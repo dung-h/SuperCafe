@@ -27,6 +27,14 @@ Stop stack:
 - OpenClaw web channel uses `LTW251` bridge API (`BotBridgeController`) as product/order source.
 - Telegram flow remains on existing `sales-mcp` backend.
 
+## Messenger webhook
+
+- Callback URL: `https://<your-domain>/?r=messenger/webhook`
+- Verify token env on website service: `MESSENGER_VERIFY_TOKEN`
+- Optional hardening:
+  - `MESSENGER_APP_SECRET` for signature validation (`X-Hub-Signature-256`)
+  - `MESSENGER_PAGE_ACCESS_TOKEN` to send replies via Graph API
+
 ## Security warning
 
 - Do not commit real secrets.

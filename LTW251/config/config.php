@@ -22,5 +22,9 @@ define('SMTP_PORT', (int)(getenv('SMTP_PORT') ?: 1025));
 define('BOT_BRIDGE_API_KEY', getenv('BOT_BRIDGE_API_KEY') ?: 'dev-bridge-key-change-me');
 define('OPENCLAW_URL', getenv('OPENCLAW_URL') ?: 'http://localhost:8082');
 define('OPENCLAW_TIMEOUT_MS', (int)(getenv('OPENCLAW_TIMEOUT_MS') ?: 20000));
+define('MESSENGER_VERIFY_TOKEN', getenv('MESSENGER_VERIFY_TOKEN') ?: 'change-me-messenger-verify-token');
+define('MESSENGER_APP_SECRET', getenv('MESSENGER_APP_SECRET') ?: '');
+define('MESSENGER_PAGE_ACCESS_TOKEN', getenv('MESSENGER_PAGE_ACCESS_TOKEN') ?: '');
+define('MESSENGER_GRAPH_VERSION', getenv('MESSENGER_GRAPH_VERSION') ?: 'v21.0');
 
 date_default_timezone_set('Asia/Ho_Chi_Minh');

@@ -390,3 +390,4 @@ Nếu gặp vấn đề, vui lòng liên hệ:
 - POST `/?r=botBridge/faqAnswer`
 
 Bridge endpoints require header: `x-api-key: <BOT_BRIDGE_API_KEY>`.
+- GET/POST `/?r=messenger/webhook` (Meta Messenger webhook verify + event receive)

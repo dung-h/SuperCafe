@@ -37,6 +37,10 @@ services:
       BOT_BRIDGE_API_KEY: dev-bridge-key-change-me
       OPENCLAW_URL: http://openclaw_agent:8082
       OPENCLAW_TIMEOUT_MS: 20000
+      MESSENGER_VERIFY_TOKEN: change-me-messenger-verify-token
+      MESSENGER_APP_SECRET: ""
+      MESSENGER_PAGE_ACCESS_TOKEN: ""
+      MESSENGER_GRAPH_VERSION: v21.0
       SMTP_HOST: lowland_mailhog
       SMTP_PORT: 1025
     ports:
