@@ -1,0 +1,24 @@
+# Monorepo ignores
+**/node_modules/
+**/vendor/
+**/dist/
+**/coverage/
+**/.cache/
+**/.DS_Store
+**/*.log
+
+# Runtime databases
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# Env files by default
+**/.env
+**/.env.*
+!**/.env.example
+OpenClaw/infra/env/*.env
+!OpenClaw/infra/env/.env.example
+
+# PHP uploads/artifacts
+LTW251/public/uploads/tmp/
+LTW251/.git_ltw251_backup/

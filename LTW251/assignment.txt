@@ -1,0 +1,391 @@
+BÀI TẬP LỚN
+Lập trình web (HK1 2025-2026)
+
+1. Đề bài
+Thiết kế giao diện và xây dựng các tính năng cơ bản cho website công ty - doanh nghiệp
+
+2. Mục tiêu
+Thiết kế giao diện và lập trình các tính năng cơ bản cho ứng dụng web sử dụng các kiến thức đã được
+học:
+•
+•
+•
+•
+•
+•
+•
+
+HTML5
+CSS3
+Javascript
+PHP
+PHP & MySQL
+Tìm hiểu một số các thư viện/framework sử dụng trong lập trình web
+Bảo mật và SEO cơ bản cho ứng dụng web
+
+3. Yêu cầu chung
+•
+
+Nhóm tối đa 4 thành viên, theo danh sách được cập nhật ở Bkel, thực hiện chia nhóm và nộp
+danh sách vào buổi học Lab đầu tiên.
+
+•
+
+Sử dụng PHP version 7.0 trở lên, chỉ sử dụng ngôn ngữ PHP cho các tác vụ xử lý ở phía Server.
+
+•
+
+Sinh viên tìm hiểu cách thức hoạt động, thiết kế giao diện và xây dựng tính năng cho website
+được cho công ty - doanh nghiệp, dùng các kiến thức đã được học: HTML5/CSS3, javascript,
+PHP và MySQL. Sinh viên xây dựng ứng dụng Web sử dụng các ngôn ngữ lập trình khác không
+có trong chương trình học sẽ nhận 0 điểm cho assignment.
+
+•
+
+Không sử dụng bất kì PHP Framework, CMF (Content Management Framework) hay CMS
+(Content Management System). Nếu bị phát hiện sử dụng các PHP Framework, CMF, CMS,
+sinh viên sẽ nhận 0 điểm cho Assignment.
+
+•
+
+Sinh viên có thể xây dựng ứng dụng web theo mô hình MVC (Model - View - Controller), yêu
+cầu sinh viên tự viết code, không sử dụng các loại framework PHP có sẵn.
+
+•
+
+Được phép sử dụng các thư viện/framework CSS3 và javascript.
+
+•
+
+Tất cả mã HTML5/CSS3 phải được kiểm tra và sửa lỗi theo chuẩn W3C. http://validator.w3.org
+
+•
+
+Sử dụng responsive design (trang web có khả năng hiển thị tốt trên các thiết bị điện thoại di
+động, máy tính bảng, máy tính để bàn,...)
+
+•
+
+Kiểm thử giao diện website trên các loại trình duyệt phổ biến.
+
+•
+
+Tìm hiểu các lỗ hổng bảo mật trong ứng dụng web và cách thức phòng chống khi hiện thực các
+tính năng cho website.
+
+•
+
+Tìm hiểu về SEO và ứng dụng vào sản phẩm
+
+Tìm hiểu loại hình website cho công ty - doanh nghiệp và thiết kế giao diện, bao gồm các
+trang giao diện cơ bản:
+
+•
+
+o
+
+Trang chủ
+
+o
+
+Giới thiệu
+
+o
+
+Thông tin dịch vụ, sản phẩm
+
+o
+
+Bảng giá
+
+o
+
+Liên hệ
+
+o
+
+Hỏi/đáp
+
+o
+
+Tin tức
+
+o
+
+Giao diện các trang liên quan như đăng ký, đăng nhập, giỏ hàng, thông tin thanh toán (nếu
+có), các trang quản lý,...
+
+Lập trình các tính năng cơ bản cho ứng dụng web:
+o
+
+Thiết kế tính năng cho các loại người dùng:
+∗ Khách:
+
+§
+
+Xem các thông tin public trên trang web: các trang thông tin như trang chủ, sản
+phẩm, thông tin liện hệ, tin tức,...
+
+§
+
+Tìm kiếm tài nguyên (tin tức, sản phẩm, dịch vụ),...
+
+§
+
+Đăng ký - Đăng nhập
+
+∗ Thành viên (sau khi đã đăng nhập): Lập trình một số chức năng cơ bản:
+
+§
+
+Thay đổi thông tin cá nhân, mật khẩu, hình ảnh đại diện,...
+
+§
+
+Viết bình luận đánh giá (cho sản phẩm, tin tức,...)
+
+§
+
+Các tính năng khác dành riêng cho thành viên
+
+∗ Quản trị viên:
+
+§
+
+Quản lý thành viên (xem thông tin, sửa, cấm, xóa thành viên,. . . ).
+
+§
+
+Quản lý bình luận đánh giá của thành viên
+
+§
+
+Quản lý các liên hệ của khách hàng
+
+§
+
+Quản lý thông tin trên các trang public như thay đổi thông tin liên hệ.
+
+§
+
+Quản lý (xem, thêm, sửa, xoá) các trang thông tin như sản phẩm, dịch vụ, bảng
+giá,...
+
+§
+
+Quản lý (xem, thêm, sửa, xoá) tin tức, quản lý từ khoá, mô tả, tiêu đề bài viết.
+
+§
+
+Các tính năng quản lý tài nguyên của trang web khác như quản lý hình ảnh, nội
+dung của trang web,...
+
+o
+
+Các tính năng đặc thù khác tuỳ vào loại sản phẩm của website nhóm lựa chọn.
+
+o
+
+Thiết kế cơ sở dữ liệu (MySQL) để lưu trữ thông tin của ứng dụng web.
+
+o
+
+Thực hiện kiểm tra dữ liệu đầu vào, sử dụng cả kiểm tra bằng javascript (client side) và
+PHP (server side).
+
+o
+
+Tìm hiểu và ứng dụng các thư viện/framework CSS3, javascript để thiết kế giao diện,
+hiệu ứng và tương tác cho trang web như carousel, wysiwyg, drag & drop file upload,
+lazy loading, parallax, animations,...
+
+o
+
+Hiện thực phân trang cho các tính năng hiển thị thông tin quá dài
+
+4. Phân chia công việc cho nhóm
+Tất cả các thành viên trong nhóm đều phải tham gia làm bài tập lớn và viết báo cáo cho phần của
+mình theo phân chia công việc như bên dưới:
+•
+
+•
+
+Phần công việc chung:
+o
+
+Thiết kế mô hình ứng dụng (không sử dụng PHP framework)
+
+o
+
+Thiết kế cơ sở dữ liệu quan hệ
+
+o
+
+Thiết kế các mẫu (template) chung cho website
+
+o
+
+Giao diện & tính năng đăng ký / đăng nhập người dùng, phân quyền cho người dùng theo
+yêu cầu đề bài
+
+o
+
+Tính năng cho phép người dùng thay đổi thông tin, mật khẩu, avatar,… sau khi đã đăng ký
+
+o
+
+Tính năng quản lý người dùng dành cho quản trị viên (xem thông tin, reset mật khẩu, khoá
+người dùng,…)
+
+Phần công việc cho từng thành viên:
+
+Mỗi thành viên của nhóm chọn 1 phần công việc bên dưới (không chọn trùng nhau):
+
+Công việc
+
+Nội dung
+Giao diện:
+- Trang chủ
+- Trang Liên hệ
+
+#1
+
+Tính năng quản lý (dành cho quản trị viên):
+- Quản lý thông tin trên các trang đã thiết kế (tính năng cho phép người dùng thay
+đổi các nội dung trên trang như các nội dung giới thiệu, số điện thoại, địa chỉ công
+ty, hình ảnh, logo,…)
+- Quản lý các liên hệ của khách hàng (xem thông tin, đánh dấu đã đọc/chưa đọc/đã
+phản hồi, xoá liên hệ,…)
+Giao diện:
+- Trang Giới thiệu
+
+#2
+
+- Trang Hỏi/đáp
+Tính năng quản lý (dành cho quản trị viên):
+- Quản lý thông tin trên các trang đã thiết kế (tính năng cho phép người dùng thay
+đổi các nội dung trên trang như các nội dung giới thiệu, hình ảnh,…)
+
+- Quản lý các câu hỏi/đáp (xem, thêm sửa, xoá)
+Giao diện:
+- Trang danh sách sản phẩm (cho phép tìm kiếm sản phẩm theo từ khoá)
+- Trang thông tin chi tiết sản phẩm/giỏ hàng
+#3
+
+Tính năng quản lý (dành cho quản trị viên):
+- Quản lý sản phẩm (xem (tìm kiếm), thêm, sửa, xoá thông tin sản phẩm)
+- Quản lý giỏ hàng, đơn hàng (xem thông tin, đánh dấu trạng thái cho giỏ hàng, đơn
+hàng)
+Giao diện:
+- Trang danh sách bài viết (cho phép tìm kiếm bài viết / tin tức theo từ khoá)
+- Trang đọc bài viết
+
+#4
+
+Tính năng quản lý (dành cho quản trị viên):
+- Quản lý tin tức (xem (tìm kiếm), thêm, sửa, xoá thông tin bài viết)
+- Quản lý bình luận/đánh giá của người dùng trên bài viết
+
+Ghi chú:
+a. Phần quản lý dành cho quản trị viên: SV tập trung vào xây dựng tính năng, giao diện cho
+trang quản lý sử dụng Dashboard template: Tabler
+o
+
+Documentation: https://docs.tabler.io/
+
+o
+
+Demo: https://tabler.io/admin-template/preview
+
+b. Kiểm tra dữ liệu đầu vào cho tất cả các form
+c. Các trang tính năng quản lý có hỗ trợ phân trang (pagination)
+d. Hiện thực tính năng upload hình ảnh lên server, không sử dụng URL hình ảnh bên ngoài
+website
+
+5. Cách thức báo cáo, tính điểm
+§
+
+Sinh viên chạy Demo trực tiếp vào buổi báo cáo được tổ chức vào cuối kỳ, sẽ có thông báo cụ
+thể về ngày, giờ báo cáo.
+
+§
+
+Các nhóm nộp lại mã nguồn, file cơ sở dữ liệu, kèm theo báo cáo (hard copy và soft copy được
+trình bày theo quy định ở mục 5), cách cài đặt ứng dụng,...
+
+§
+
+Cách thức tính điểm tùy thuộc vào số lượng và chất lượng các tính năng của ứng dụng theo yêu
+cầu đề bài.
+
+§
+
+Số lượng tính năng nhiều, thiết kế giao diện đẹp, cơ sở dữ liệu tốt sẽ được cộng điểm bonus.
+
+§
+
+Điểm được tính cho từng thành viên.
+
+§
+
+Sinh viên sao chép toàn bộ mã nguồn của các trang web khác mà không tự mình viết code sẽ bị
+0 điểm.
+
+§
+
+Các bài làm giống nhau hoàn toàn hoặc vi phạm các yêu cầu như ở mục 3 sẽ được xem là gian
+lận và bị 0 điểm, kể cả những bài làm giống với các khoá trước.
+
+6. Quy định báo cáo
+§
+
+Báo cáo tối thiểu 20 trang.
+
+§
+
+Ghi địa chỉ email để liên hệ nhóm vào trang bìa báo cáo.
+
+§
+
+Giới thiệu: tìm hiểu về website công ty - doanh nghiệp
+
+§
+
+Cơ sở lý thuyết: Mô tả các thư viện, công nghệ có sử dụng trong bài tập lớn, ưu điểm nhược
+điểm của các thư viện, công nghệ đó,..., các lỗ hổng bảo mật trong ứng dụng web, SEO,...
+
+§
+
+Thiết kế ứng dụng: Mô tả thiết kế cơ sở dữ liệu, ý nghĩa các bảng dữ liệu và các trường trong
+bảng. Trình bày cấu trúc mã nguồn, mô hình ứng dụng, các tính năng được xây dựng,
+flowchart,...
+
+§
+
+Hiện thực: các tính năng được thiết kế và hình ảnh,...
+
+§
+
+Cách thức cài đặt ứng dụng, môi trường chạy ứng dụng, phiên bản PHP hỗ trợ,...
+
+§
+
+Nhiệm vụ, vai trò của từng thành viên trong nhóm.
+
+§
+
+Tài liệu tham khảo
+
+7. Ghi chú
+§
+
+Các sinh viên tự liên hệ với nhóm của mình để làm bài tập lớn (theo danh sách email liên lạc các
+thành viên trong nhóm), thành viên nào không tham gia làm bài tập lớn sẽ nhận 0 điểm, và nhóm
+không ghi tên các thành viên không tham gia làm bài tập lớn vào báo cáo.
+
+§
+
+Mọi thay đổi về danh sách nhóm, sinh viên phải thông báo trước cho giảng viên phụ trách để
+được cập nhật.
+
+

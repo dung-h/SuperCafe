@@ -1,0 +1,17 @@
+{
+  "name": "@openclaw/shared-types",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "test": "echo \"No tests for shared-types\"",
+    "lint": "echo \"No lint configured\""
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5",
+    "typescript": "^5.7.3"
+  }
+}

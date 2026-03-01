@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Drinks Mini App</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&family=Space+Grotesk:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+
+    <main class="container">
+      <header class="hero">
+        <p class="kicker">Telegram Mini App</p>
+        <h1 id="shopName">OpenClaw Drinks</h1>
+        <p id="tgUserLabel" class="subtle">Đang tải thông tin Telegram...</p>
+        <div class="quick-hints">
+          <span class="hint">1) Chọn món</span>
+          <span class="hint">2) Kiểm tra giỏ + thông tin nhận hàng</span>
+          <span class="hint">3) Tạo đơn và thanh toán</span>
+        </div>
+      </header>
+
+      <nav id="checkoutSteps" class="checkout-steps">
+        <button type="button" class="step-pill active" data-step-target="1">Bước 1: Chọn món</button>
+        <button type="button" class="step-pill" data-step-target="2">Bước 2: Xác nhận giỏ</button>
+        <button type="button" class="step-pill" data-step-target="3">Bước 3: Thanh toán</button>
+      </nav>
+
+      <section class="panel step-panel" data-step-panel="1">
+        <div class="panel-head">
+          <h2>Menu đồ uống</h2>
+          <form id="searchForm" class="search-form">
+            <input id="searchInput" type="text" placeholder="Tìm theo tên hoặc SKU..." />
+            <button type="submit">Tìm</button>
+          </form>
+        </div>
+        <div id="categoryChips" class="category-chips"></div>
+        <div id="products" class="products"></div>
+        <div class="cart-cta">
+          <div id="cartSummary" class="cart-summary">Chưa chọn món nào.</div>
+          <button id="goStep2Btn" class="primary" type="button">Tiếp tục xác nhận giỏ</button>
+        </div>
+      </section>
+
+      <section class="panel step-panel hidden" data-step-panel="2">
+        <h2>Xác nhận giỏ hàng và thông tin nhận</h2>
+        <div id="cartDetail" class="cart-detail"></div>
+        <div id="upsellBox" class="upsell-box hidden"></div>
+        <form id="orderForm" class="form-grid">
+          <label>
+            Họ tên
+            <input id="customerName" required />
+          </label>
+          <label>
+            Số điện thoại
+            <input id="customerPhone" required />
+          </label>
+          <label class="full">
+            Địa chỉ
+            <input id="customerAddress" required />
+          </label>
+          <label>
+            Phương thức thanh toán
+            <select id="paymentMethod">
+              <option value="bank_transfer">Chuyển khoản</option>
+              <option value="cod">COD</option>
+            </select>
+          </label>
+          <label class="full">
+            Ghi chú
+            <input id="orderNote" placeholder="Không bắt buộc" />
+          </label>
+          <label class="full">
+            Telegram ID
+            <input id="telegramUserId" required />
+          </label>
+          <div class="full checkout-actions">
+            <button type="button" class="ghost" data-go-step="1">Quay lại chọn món</button>
+            <button id="orderSubmitBtn" class="primary" type="submit">Tạo đơn sang bước thanh toán</button>
+          </div>
+        </form>
+        <p id="orderResult" class="status"></p>
+      </section>
+
+      <section class="panel step-panel hidden" data-step-panel="3">
+        <h2>Hoàn tất thanh toán</h2>
+        <div id="orderSummary" class="order-summary">Chưa có đơn hàng. Hãy tạo đơn ở bước 2.</div>
+
+        <div id="paymentPanel" class="payment-box hidden">
+          <h3>Thanh toán chuyển khoản</h3>
+          <p id="bankInfo" class="bank-info"></p>
+          <form id="paymentForm" class="form-grid">
+            <label>
+              Mã giao dịch
+              <input id="transferRef" required />
+            </label>
+            <label class="full">
+              Ghi chú chứng từ
+              <input id="proofText" />
+            </label>
+            <button id="paySubmitBtn" class="full accent" type="submit">Gửi xác nhận thanh toán</button>
+          </form>
+        </div>
+        <p id="paymentResult" class="status"></p>
+        <div class="checkout-actions">
+          <button type="button" class="ghost" data-go-step="2">Quay lại bước 2</button>
+          <button id="newOrderBtn" class="primary" type="button">Tạo đơn mới</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Tra cứu đơn</h2>
+        <form id="statusForm" class="status-form">
+          <input id="statusOrderCode" placeholder="ORD-YYYYMMDD-XXXX" required />
+          <button type="submit">Kiểm tra</button>
+        </form>
+        <pre id="statusResult" class="status-result"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

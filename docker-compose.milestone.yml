@@ -1,0 +1,131 @@
+services:
+  lowland_db:
+    image: mysql:8.0
+    container_name: lowland_db
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-time-zone=+07:00
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: lowland_coffee
+      MYSQL_USER: web251
+      MYSQL_PASSWORD: Webhk251!
+    ports:
+      - "3307:3306"
+    volumes:
+      - lowland_db_data:/var/lib/mysql
+      - ./LTW251/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  lowland_app:
+    build:
+      context: ./LTW251
+      dockerfile: Dockerfile
+    container_name: lowland_app
+    restart: unless-stopped
+    depends_on:
+      lowland_db:
+        condition: service_healthy
+    environment:
+      DB_HOST: lowland_db
+      DB_NAME: lowland_coffee
+      DB_USER: web251
+      DB_PASS: Webhk251!
+      BASE_URL: http://localhost:9999
+      BOT_BRIDGE_API_KEY: dev-bridge-key-change-me
+      OPENCLAW_URL: http://openclaw_agent:8082
+      OPENCLAW_TIMEOUT_MS: 20000
+      SMTP_HOST: lowland_mailhog
+      SMTP_PORT: 1025
+    ports:
+      - "9999:80"
+    volumes:
+      - ./LTW251:/var/www/html
+
+  lowland_mailhog:
+    image: mailhog/mailhog
+    container_name: lowland_mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  openclaw_sales_mcp:
+    build:
+      context: ./OpenClaw
+      dockerfile: services/sales-mcp/Dockerfile
+    container_name: openclaw_sales_mcp
+    env_file:
+      - ./OpenClaw/infra/env/.env
+    environment:
+      SQLITE_PATH: /data/sales.db
+      SALES_MCP_HOST: 0.0.0.0
+      SALES_MCP_PORT: 8081
+    volumes:
+      - ./OpenClaw/infra/sqlite:/data
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8081/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  openclaw_agent:
+    build:
+      context: ./OpenClaw
+      dockerfile: services/openclaw/Dockerfile
+    container_name: openclaw_agent
+    env_file:
+      - ./OpenClaw/infra/env/.env
+    environment:
+      OPENCLAW_HOST: 0.0.0.0
+      OPENCLAW_PORT: 8082
+      SALES_MCP_URL: http://openclaw_sales_mcp:8081
+      WEB_BRIDGE_BASE_URL: http://lowland_app
+      WEB_BRIDGE_API_KEY: dev-bridge-key-change-me
+    depends_on:
+      openclaw_sales_mcp:
+        condition: service_healthy
+      lowland_app:
+        condition: service_started
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8082/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  openclaw_telegram_gateway:
+    build:
+      context: ./OpenClaw
+      dockerfile: services/telegram-gateway/Dockerfile
+    container_name: openclaw_telegram_gateway
+    env_file:
+      - ./OpenClaw/infra/env/.env
+    environment:
+      TELEGRAM_GATEWAY_HOST: 0.0.0.0
+      TELEGRAM_GATEWAY_PORT: 8083
+      SALES_MCP_URL: http://openclaw_sales_mcp:8081
+      OPENCLAW_URL: http://openclaw_agent:8082
+      TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+    depends_on:
+      openclaw_sales_mcp:
+        condition: service_healthy
+      openclaw_agent:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8083/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  lowland_db_data:

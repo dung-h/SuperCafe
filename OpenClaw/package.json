@@ -1,0 +1,19 @@
+{
+  "name": "openclaw-sales-bot",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -w @openclaw/shared-types build && npm run -w @openclaw/sales-mcp build && npm run -w @openclaw/openclaw build && npm run -w @openclaw/telegram-gateway build && npm run -w @openclaw/telegram-miniapp build",
+    "dev": "npm run -ws dev",
+    "test": "npm run -w @openclaw/shared-types build && npm run -w @openclaw/sales-mcp test && npm run -w @openclaw/openclaw test && npm run -w @openclaw/telegram-gateway test && npm run -w @openclaw/telegram-miniapp test && npm run -w @openclaw/shared-types test",
+    "lint": "npm run -ws lint",
+    "start": "npm run -ws start"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

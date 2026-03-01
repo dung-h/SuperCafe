@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+infra/env/*.env
+!infra/env/.env.example
+dist
+coverage
+.DS_Store
+infra/sqlite/*.db
+infra/sqlite/backups/

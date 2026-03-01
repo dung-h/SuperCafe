@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450">
+  <rect width="100%" height="100%" fill="#f5ebe0"/>
+  <rect x="40" y="60" width="720" height="260" rx="16" fill="#d6ccc2"/>
+  <text x="50%" y="52%" text-anchor="middle" fill="#3e2723" font-size="32" font-family="system-ui" font-weight="bold">
+    Lowland Coffee Blog
+  </text>
+  <text x="50%" y="70%" text-anchor="middle" fill="#5d4037" font-size="20" font-family="system-ui">
+    Hình bài viết
+  </text>
+</svg>
+

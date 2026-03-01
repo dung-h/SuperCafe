@@ -1,0 +1,97 @@
+services:
+  sales-mcp:
+    build:
+      context: .
+      dockerfile: services/sales-mcp/Dockerfile
+    container_name: openclaw-sales-mcp
+    env_file:
+      - ./infra/env/.env
+    environment:
+      SQLITE_PATH: /data/sales.db
+      SALES_MCP_HOST: 0.0.0.0
+      SALES_MCP_PORT: 8081
+    volumes:
+      - ./infra/sqlite:/data
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8081/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  openclaw:
+    build:
+      context: .
+      dockerfile: services/openclaw/Dockerfile
+    container_name: openclaw-agent
+    env_file:
+      - ./infra/env/.env
+    environment:
+      OPENCLAW_HOST: 0.0.0.0
+      OPENCLAW_PORT: 8082
+      SALES_MCP_URL: http://sales-mcp:8081
+      WEB_BRIDGE_BASE_URL: ${WEB_BRIDGE_BASE_URL:-http://localhost:9999}
+      WEB_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
+    depends_on:
+      sales-mcp:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8082/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  telegram-gateway:
+    build:
+      context: .
+      dockerfile: services/telegram-gateway/Dockerfile
+    container_name: openclaw-telegram-gateway
+    env_file:
+      - ./infra/env/.env
+    environment:
+      TELEGRAM_GATEWAY_HOST: 0.0.0.0
+      TELEGRAM_GATEWAY_PORT: 8083
+      SALES_MCP_URL: http://sales-mcp:8081
+      OPENCLAW_URL: http://openclaw:8082
+      TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+    depends_on:
+      sales-mcp:
+        condition: service_healthy
+      openclaw:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8083/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  telegram-miniapp:
+    build:
+      context: .
+      dockerfile: services/telegram-miniapp/Dockerfile
+    container_name: openclaw-telegram-miniapp
+    env_file:
+      - ./infra/env/.env
+    environment:
+      TELEGRAM_MINIAPP_HOST: 0.0.0.0
+      TELEGRAM_MINIAPP_PORT: 8084
+      SALES_MCP_URL: http://sales-mcp:8081
+    depends_on:
+      sales-mcp:
+        condition: service_healthy
+    ports:
+      - "8084:8084"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8084/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

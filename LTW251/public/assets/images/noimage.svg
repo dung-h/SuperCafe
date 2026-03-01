@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+  <defs>
+    <linearGradient id="noimgBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d7b19d"/>
+      <stop offset="100%" stop-color="#8b5a3c"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#noimgBg)"/>
+  <text x="50%" y="45%" text-anchor="middle" fill="#ffffff" font-size="40" font-family="system-ui" font-weight="bold">
+    Lowland Coffee
+  </text>
+  <text x="50%" y="60%" text-anchor="middle" fill="#f8f5f2" font-size="22" font-family="system-ui">
+    Không có hình
+  </text>
+</svg>
+

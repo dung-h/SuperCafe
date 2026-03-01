@@ -1,0 +1,37 @@
+{
+  "name": "@openclaw/sales-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "hash-passphrase": "tsx src/scripts/hash-passphrase.ts",
+    "test": "npm run -w @openclaw/shared-types build && vitest run",
+    "lint": "echo \"No lint configured\""
+  },
+  "dependencies": {
+    "@openclaw/shared-types": "*",
+    "argon2": "^0.41.1",
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.1.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

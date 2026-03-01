@@ -1,0 +1,13 @@
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+# if requests are not the real files or dirs -> redirect to index.php
+	RewriteCond %{REQUEST_FILENAME} !-f
+	RewriteCond %{REQUEST_FILENAME} !-d
+	RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+# protect sensitive files
+<FilesMatch "\.(env|ini|log|conf|sql)$">
+	Require all denied
+</FilesMatch>
+

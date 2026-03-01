@@ -1,0 +1,59 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: lowland_db
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-time-zone=+07:00
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: lowland_coffee
+      MYSQL_USER: web251
+      MYSQL_PASSWORD: Webhk251!
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Status message
+    labels:
+      description: "✅ Database MySQL 8.0 - UTF-8MB4 - Setup xong khi thấy 'healthy'"
+
+  app:
+    build: .
+    container_name: lowland_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: lowland_coffee
+      DB_USER: web251
+      DB_PASS: Webhk251!
+      BASE_URL: http://localhost:9999
+      BOT_BRIDGE_API_KEY: dev-bridge-key-change-me
+      OPENCLAW_URL: http://host.docker.internal:8082
+      OPENCLAW_TIMEOUT_MS: 20000
+    ports:
+      - "9999:80"
+    volumes:
+      - .:/var/www/html
+    # Status message
+    labels:
+      description: "✅ PHP 8.2 Apache - Sẵn sàng tại http://localhost:9999"
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: lowland_mailhog
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    labels:
+      description: "✅ MailHog - SMTP Test Server tại http://localhost:8025"
+
+volumes:
+  db_data:
