@@ -45,7 +45,19 @@ const optionalPaymentMethod = z.preprocess((value) => {
 }, z.enum(["bank_transfer", "cod"]).optional());
 
 const classifySchema = z.object({
-  intent: z.enum(["catalog_list", "catalog_get", "faq", "order_get", "order_create", "payment_help", "smalltalk"]),
+  intent: z.enum([
+    "catalog_list",
+    "catalog_get",
+    "faq",
+    "order_get",
+    "order_create",
+    "payment_help",
+    "handoff_request",
+    "handoff_resume",
+    "greeting",
+    "bot_help",
+    "smalltalk",
+  ]),
   sku: optionalText,
   orderCode: optionalText,
   query: optionalText,

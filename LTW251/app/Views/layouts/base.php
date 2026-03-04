@@ -10,7 +10,8 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
-  <link rel="stylesheet" href="<?= BASE_URL ?>/assets/main.css">
+  <link rel="stylesheet" href="<?= BASE_URL ?>/assets/main.css?v=<?= time() ?>">
+  <link rel="stylesheet" href="<?= BASE_URL ?>/assets/chatbot-widget.css?v=<?= time() ?>">
   <style>
     .dropdown-menu {
       animation: slideIn 0.2s ease-out;
@@ -172,214 +173,25 @@
     </div>
   </footer>
 
-  <div id="chatbot-widget" class="chatbot-widget">
+  <div id="chatbot-widget" class="chatbot-widget" data-base-url="<?= htmlspecialchars(BASE_URL, ENT_QUOTES, 'UTF-8') ?>">
     <button id="chatbot-toggle" class="chatbot-toggle" type="button" aria-label="Mo tro ly">
       <i class="bi bi-chat-dots-fill"></i>
     </button>
-    <div id="chatbot-panel" class="chatbot-panel d-none">
+    <div id="chatbot-panel" class="chatbot-panel">
       <div class="chatbot-header">
-        <strong>Tro ly dat nuoc</strong>
+        <strong>Trợ lý đặt nước</strong>
         <button id="chatbot-close" type="button" class="btn-close btn-close-white" aria-label="Dong"></button>
       </div>
       <div id="chatbot-messages" class="chatbot-messages"></div>
+      <div id="chatbot-quick" class="chatbot-quick"></div>
       <form id="chatbot-form" class="chatbot-form">
-        <input id="chatbot-input" type="text" class="form-control" placeholder="Nhap cau hoi..." maxlength="500" required>
-        <button class="btn btn-warning text-dark fw-bold" type="submit">Gui</button>
+        <input id="chatbot-input" type="text" class="form-control" placeholder="Nhập câu hỏi..." maxlength="500" required>
+        <button class="btn btn-warning text-dark fw-bold" type="submit">Gửi</button>
       </form>
     </div>
   </div>
 
-  <style>
-    .chatbot-widget {
-      position: fixed;
-      right: 16px;
-      bottom: 16px;
-      z-index: 1100;
-    }
-    .chatbot-toggle {
-      width: 56px;
-      height: 56px;
-      border: 0;
-      border-radius: 50%;
-      color: #fff;
-      background: #5d4037;
-      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
-    }
-    .chatbot-panel {
-      width: min(92vw, 360px);
-      height: 480px;
-      margin-top: 12px;
-      background: #fff;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
-      display: flex;
-      flex-direction: column;
-    }
-    .chatbot-header {
-      padding: 12px 14px;
-      color: #fff;
-      background: #3e2723;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .chatbot-messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 10px;
-      background: #f7f1ec;
-    }
-    .chatbot-row {
-      margin-bottom: 8px;
-      display: flex;
-    }
-    .chatbot-row.user {
-      justify-content: flex-end;
-    }
-    .chatbot-bubble {
-      max-width: 85%;
-      padding: 8px 10px;
-      border-radius: 10px;
-      white-space: pre-wrap;
-      font-size: 14px;
-      line-height: 1.4;
-    }
-    .chatbot-row.user .chatbot-bubble {
-      background: #5d4037;
-      color: #fff;
-    }
-    .chatbot-row.bot .chatbot-bubble {
-      background: #fff;
-      border: 1px solid #ddd;
-      color: #222;
-    }
-    .chatbot-form {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      padding: 10px;
-      border-top: 1px solid #eee;
-      background: #fff;
-    }
-  </style>
-  
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    (function () {
-      var storageKey = 'lowland_chatbot_history_v1';
-      var toggleBtn = document.getElementById('chatbot-toggle');
-      var closeBtn = document.getElementById('chatbot-close');
-      var panel = document.getElementById('chatbot-panel');
-      var form = document.getElementById('chatbot-form');
-      var input = document.getElementById('chatbot-input');
-      var messages = document.getElementById('chatbot-messages');
-      if (!toggleBtn || !panel || !form || !input || !messages) return;
-
-      function loadHistory() {
-        try {
-          var raw = localStorage.getItem(storageKey);
-          if (!raw) return [];
-          var parsed = JSON.parse(raw);
-          return Array.isArray(parsed) ? parsed : [];
-        } catch (e) {
-          return [];
-        }
-      }
-
-      function saveHistory(history) {
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(history.slice(-40)));
-        } catch (e) {}
-      }
-
-      function addMessage(role, text) {
-        var row = document.createElement('div');
-        row.className = 'chatbot-row ' + role;
-        var bubble = document.createElement('div');
-        bubble.className = 'chatbot-bubble';
-        bubble.textContent = text;
-        row.appendChild(bubble);
-        messages.appendChild(row);
-        messages.scrollTop = messages.scrollHeight;
-      }
-
-      function renderHistory() {
-        messages.innerHTML = '';
-        var history = loadHistory();
-        if (history.length === 0) {
-          addMessage('bot', 'Xin chao, minh la tro ly dat nuoc. Ban can tim mon nao?');
-          saveHistory([{ role: 'bot', text: 'Xin chao, minh la tro ly dat nuoc. Ban can tim mon nao?' }]);
-          return;
-        }
-        history.forEach(function (m) {
-          addMessage(m.role === 'user' ? 'user' : 'bot', m.text || '');
-        });
-      }
-
-      async function sendMessage(text) {
-        var resp = await fetch('<?= BASE_URL ?>/?r=site/chatbot', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text })
-        });
-        var data = await resp.json();
-        if (!resp.ok || !data.ok || !data.data || !data.data.reply) {
-          throw new Error((data && data.error) || 'Loi he thong');
-        }
-        return data.data.reply;
-      }
-
-      toggleBtn.addEventListener('click', function () {
-        panel.classList.toggle('d-none');
-        if (!panel.classList.contains('d-none')) {
-          input.focus();
-        }
-      });
-
-      if (closeBtn) {
-        closeBtn.addEventListener('click', function () {
-          panel.classList.add('d-none');
-        });
-      }
-
-      form.addEventListener('submit', async function (event) {
-        event.preventDefault();
-        var text = input.value.trim();
-        if (!text) return;
-        input.value = '';
-
-        var history = loadHistory();
-        history.push({ role: 'user', text: text });
-        saveHistory(history);
-        addMessage('user', text);
-
-        addMessage('bot', 'Dang xu ly...');
-        var loadingNode = messages.lastChild;
-
-        try {
-          var reply = await sendMessage(text);
-          if (loadingNode && loadingNode.parentNode) {
-            loadingNode.parentNode.removeChild(loadingNode);
-          }
-          addMessage('bot', reply);
-          history = loadHistory();
-          history.push({ role: 'bot', text: reply });
-          saveHistory(history);
-        } catch (err) {
-          if (loadingNode && loadingNode.parentNode) {
-            loadingNode.parentNode.removeChild(loadingNode);
-          }
-          var fallback = 'He thong tam loi, vui long thu lai sau.';
-          addMessage('bot', fallback);
-          history = loadHistory();
-          history.push({ role: 'bot', text: fallback });
-          saveHistory(history);
-        }
-      });
-
-      renderHistory();
-    })();
-  </script>
+  <script src="<?= BASE_URL ?>/assets/chatbot-widget.js?v=<?= time() ?>"></script>
 </body>
 </html>

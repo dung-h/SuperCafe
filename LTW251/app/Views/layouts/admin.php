@@ -28,6 +28,19 @@
     .navbar-menu .nav-link.active::after { content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 2px; background-color: var(--coffee-primary); }
     .btn-primary { background-color: var(--coffee-primary) !important; border-color: var(--coffee-primary) !important; }
     .btn-primary:hover { background-color: var(--coffee-dark) !important; }
+    .order-status-badge {
+      display: inline-block;
+      padding: 0.35rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      line-height: 1;
+    }
+    .order-status-pending { background: #1d4ed8; color: #fff; }
+    .order-status-processing { background: #f59e0b; color: #111827; }
+    .order-status-completed { background: #15803d; color: #fff; }
+    .order-status-cancelled { background: #dc2626; color: #fff; }
     /* ... Dropdown animation ... */
     .dropdown-menu { animation: slideDown 0.2s ease-out; border-radius: 0.5rem !important; }
     @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
@@ -128,6 +141,12 @@
                     <svg xmlns="http://www.w3.org/2000/svg" class="icon" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><circle cx="12" cy="13" r="2" /><line x1="13.45" y1="11.55" x2="15.5" y2="9.5" /><path d="M6.4 20a9 9 0 1 1 11.2 0z" /></svg>
                   </span>
                   <span class="nav-link-title">Dashboard</span>
+                </a>
+              </li>
+
+              <li class="nav-item <?= isActive('adminChat', $r) ?>">
+                <a class="nav-link text-blue" href="<?= BASE_URL ?>/?r=adminChat/index">
+                  <span class="nav-link-title fw-bold">Hỗ trợ trực tuyến</span>
                 </a>
               </li>
 

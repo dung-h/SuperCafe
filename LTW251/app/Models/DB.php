@@ -49,6 +49,14 @@ class DB {
   }
 
   private static function ensureBotSchema() {
+    self::$pdo->exec("
+      CREATE TABLE IF NOT EXISTS messenger_webhook_events (
+        event_id VARCHAR(191) NOT NULL PRIMARY KEY,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_messenger_events_created_at (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+
     if (!self::tableExists('products')) {
       return;
     }
@@ -90,6 +98,41 @@ class DB {
         INDEX idx_bot_orders_chat_user_id (chat_user_id),
         INDEX idx_bot_orders_order_id (order_id),
         CONSTRAINT fk_bot_orders_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+
+    self::$pdo->exec("
+      CREATE TABLE IF NOT EXISTS chat_dialogue_sessions (
+        channel VARCHAR(32) NOT NULL,
+        user_id VARCHAR(64) NOT NULL,
+        state VARCHAR(64) NOT NULL,
+        context_json LONGTEXT NOT NULL,
+        version INT NOT NULL DEFAULT 1,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        PRIMARY KEY (channel, user_id),
+        INDEX idx_chat_session_expires (expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+
+    self::$pdo->exec("
+      CREATE TABLE IF NOT EXISTS chat_dialogue_events (
+        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        channel VARCHAR(32) NOT NULL,
+        user_id VARCHAR(64) NOT NULL,
+        correlation_id VARCHAR(64) NOT NULL,
+        role ENUM('user','bot','agent','system') NOT NULL,
+        input_text TEXT NULL,
+        action_payload VARCHAR(255) NULL,
+        intent VARCHAR(64) NULL,
+        state_before VARCHAR(64) NULL,
+        state_after VARCHAR(64) NULL,
+        tool_calls_json LONGTEXT NULL,
+        latency_ms INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_chat_events_user_time (channel, user_id, created_at),
+        INDEX idx_chat_events_correlation (correlation_id),
+        INDEX idx_chat_events_intent_time (intent, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
   }

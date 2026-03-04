@@ -12,6 +12,8 @@ const envSchema = z.object({
   SALES_MCP_API_KEY: z.string().default("dev-internal-key-change-me"),
   OPENCLAW_URL: z.string().url().default("http://openclaw:8082"),
   TELEGRAM_MINI_APP_URL: z.string().default(""),
+  TELEGRAM_WEB_SESSION_SECRET: z.string().default(""),
+  TELEGRAM_WEB_SESSION_TTL_SEC: z.coerce.number().default(86400),
   ADMIN_ALERT_CHAT_ID: z.string().default(""),
   ADMIN_SESSION_TTL_MIN: z.coerce.number().default(480),
   HTTP_TIMEOUT_MS: z.coerce.number().default(20000),
@@ -26,6 +28,8 @@ export type GatewayConfig = {
   salesMcpApiKey: string;
   openclawUrl: string;
   miniAppUrl?: string;
+  webSessionSecret?: string;
+  webSessionTtlSec: number;
   adminAlertChatId?: string;
   adminSessionTtlMs: number;
   httpTimeoutMs: number;
@@ -42,6 +46,8 @@ export function readConfig(): GatewayConfig {
     salesMcpApiKey: env.SALES_MCP_API_KEY,
     openclawUrl: env.OPENCLAW_URL,
     miniAppUrl: env.TELEGRAM_MINI_APP_URL || undefined,
+    webSessionSecret: env.TELEGRAM_WEB_SESSION_SECRET || undefined,
+    webSessionTtlSec: Math.max(300, env.TELEGRAM_WEB_SESSION_TTL_SEC),
     adminAlertChatId: env.ADMIN_ALERT_CHAT_ID || undefined,
     adminSessionTtlMs: env.ADMIN_SESSION_TTL_MIN * 60 * 1000,
     httpTimeoutMs: env.HTTP_TIMEOUT_MS,

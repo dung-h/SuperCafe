@@ -33,14 +33,15 @@ services:
       DB_NAME: lowland_coffee
       DB_USER: web251
       DB_PASS: Webhk251!
-      BASE_URL: http://localhost:9999
-      BOT_BRIDGE_API_KEY: dev-bridge-key-change-me
+      BASE_URL: ${PUBLIC_BASE_URL:-}
+      BOT_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
       OPENCLAW_URL: http://openclaw_agent:8082
       OPENCLAW_TIMEOUT_MS: 20000
-      MESSENGER_VERIFY_TOKEN: change-me-messenger-verify-token
-      MESSENGER_APP_SECRET: ""
-      MESSENGER_PAGE_ACCESS_TOKEN: ""
-      MESSENGER_GRAPH_VERSION: v21.0
+      MESSENGER_VERIFY_TOKEN: ${MESSENGER_VERIFY_TOKEN:-change-me-messenger-verify-token}
+      MESSENGER_APP_SECRET: ${MESSENGER_APP_SECRET:-}
+      MESSENGER_PAGE_ACCESS_TOKEN: ${MESSENGER_PAGE_ACCESS_TOKEN:-}
+      MESSENGER_GRAPH_VERSION: ${MESSENGER_GRAPH_VERSION:-v21.0}
+      EXTERNAL_SESSION_SECRET: ${EXTERNAL_SESSION_SECRET:-}
       SMTP_HOST: lowland_mailhog
       SMTP_PORT: 1025
     ports:
@@ -55,13 +56,50 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  redis:
+    image: redis:7-alpine
+    container_name: lowland_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - lowland_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  lowland_worker:
+    build:
+      context: ./LTW251
+      dockerfile: Dockerfile
+    container_name: lowland_worker
+    restart: unless-stopped
+    command: ["php", "scripts/messenger_worker.php"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      lowland_app:
+        condition: service_started
+    environment:
+      DB_HOST: lowland_db
+      DB_NAME: lowland_coffee
+      REDIS_HOST: redis
+      BASE_URL: ${PUBLIC_BASE_URL:-}
+      BOT_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
+      OPENCLAW_URL: http://openclaw_agent:8082
+      MESSENGER_PAGE_ACCESS_TOKEN: ${MESSENGER_PAGE_ACCESS_TOKEN:-}
+      MESSENGER_GRAPH_VERSION: ${MESSENGER_GRAPH_VERSION:-v21.0}
+    volumes:
+      - ./LTW251:/var/www/html
+
   openclaw_sales_mcp:
     build:
       context: ./OpenClaw
       dockerfile: services/sales-mcp/Dockerfile
     container_name: openclaw_sales_mcp
     env_file:
-      - ./OpenClaw/infra/env/.env
+      - .env
     environment:
       SQLITE_PATH: /data/sales.db
       SALES_MCP_HOST: 0.0.0.0
@@ -83,13 +121,20 @@ services:
       dockerfile: services/openclaw/Dockerfile
     container_name: openclaw_agent
     env_file:
-      - ./OpenClaw/infra/env/.env
+      - .env
     environment:
       OPENCLAW_HOST: 0.0.0.0
       OPENCLAW_PORT: 8082
       SALES_MCP_URL: http://openclaw_sales_mcp:8081
-      WEB_BRIDGE_BASE_URL: http://lowland_app
-      WEB_BRIDGE_API_KEY: dev-bridge-key-change-me
+      WEB_BRIDGE_BASE_URL: ${WEB_BRIDGE_BASE_URL:-http://lowland_app}
+      WEB_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
+      OPENCLAW_DB_HOST: lowland_db
+      OPENCLAW_DB_PORT: 3306
+      OPENCLAW_DB_NAME: lowland_coffee
+      OPENCLAW_DB_USER: web251
+      OPENCLAW_DB_PASS: Webhk251!
+      DIALOG_ENGINE_V2_ENABLED: ${DIALOG_ENGINE_V2_ENABLED:-false}
+      DIALOG_SESSION_TTL_HOURS: ${DIALOG_SESSION_TTL_HOURS:-24}
     depends_on:
       openclaw_sales_mcp:
         condition: service_healthy
@@ -110,13 +155,15 @@ services:
       dockerfile: services/telegram-gateway/Dockerfile
     container_name: openclaw_telegram_gateway
     env_file:
-      - ./OpenClaw/infra/env/.env
+      - .env
     environment:
       TELEGRAM_GATEWAY_HOST: 0.0.0.0
       TELEGRAM_GATEWAY_PORT: 8083
       SALES_MCP_URL: http://openclaw_sales_mcp:8081
       OPENCLAW_URL: http://openclaw_agent:8082
       TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+      TELEGRAM_WEB_SESSION_SECRET: ${EXTERNAL_SESSION_SECRET:-}
+      TELEGRAM_WEB_SESSION_TTL_SEC: ${EXTERNAL_SESSION_TTL_SEC:-86400}
     depends_on:
       openclaw_sales_mcp:
         condition: service_healthy
@@ -133,3 +180,4 @@ services:
 
 volumes:
   lowland_db_data:
+  lowland_redis_data:

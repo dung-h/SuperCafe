@@ -1,0 +1,36 @@
+name: Smoke Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Prepare environment variables
+      run: |
+        cp milestone.env.example .env
+        echo "MESSENGER_VERIFY_TOKEN=010705" >> .env
+        echo "MESSENGER_APP_SECRET=ci-secret-12345" >> .env
+        echo "WEB_BRIDGE_API_KEY=ci-bridge-key" >> .env
+
+    - name: Start services using docker-compose
+      run: docker compose -f docker-compose.milestone.yml up -d --build
+
+    - name: Wait for services to be healthy
+      run: |
+        echo "Waiting for containers to be ready..."
+        sleep 15
+        docker compose -f docker-compose.milestone.yml ps
+
+    - name: Run Chatbot Smoke Test
+      run: ./scripts/chatbot-smoke.sh
+
+    - name: Run Messenger Webhook Smoke Test
+      run: ./scripts/messenger-webhook-smoke.sh

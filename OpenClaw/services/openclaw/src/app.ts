@@ -5,17 +5,26 @@ import { z } from "zod";
 import { buildBackend, type BackendChannel } from "./backends";
 import { type ClassifyResult, HttpClient, parseClassifierJson } from "./clients";
 import type { OpenClawConfig } from "./config";
+import { DialogueEventLoggerMySql } from "./dialogue/eventLoggerMySql";
+import { DialoguePolicyEngine } from "./dialogue/policyEngine";
+import { DialogueStateStoreMySql } from "./dialogue/stateStoreMySql";
+import type { DialogueEventLog, UiSuggestion } from "./dialogue/types";
+import { HandoffStore } from "./handoffStore";
 import { LlmClient } from "./llmClient";
 import { logger } from "./logger";
-import { messengerNotEnabledReply } from "./messenger";
 
 type ChatChannel = "telegram" | "web" | "messenger";
 
 type ChatRequest = {
   userId: string;
   message: string;
+  actionPayload?: string;
   correlationId?: string;
   channel?: ChatChannel;
+  clientContext?: {
+    sourceMessageId?: string;
+    locale?: string;
+  };
   profile?: {
     name?: string;
     phone?: string;
@@ -27,11 +36,41 @@ type IntentResult = ClassifyResult & {
   category?: string;
 };
 
+type MenuUiItem = {
+  sku: string;
+  name: string;
+  category?: string;
+  priceVnd: number;
+  stockQty: number;
+};
+
+type ChatResult = {
+  reply: string;
+  alerts?: string[];
+  state?: {
+    name: string;
+    missingFields: string[];
+  };
+  ui?: {
+    type: "menu";
+    title: string;
+    items: MenuUiItem[];
+    suggestions?: Array<string | UiSuggestion>;
+  };
+};
+
 const chatSchema = z.object({
   userId: z.string().min(1),
-  message: z.string().min(1),
+  message: z.string().optional().default(""),
+  actionPayload: z.preprocess((value) => (value === null ? undefined : value), z.string().max(255).optional()),
   correlationId: z.string().optional(),
   channel: z.enum(["telegram", "web", "messenger"]).optional(),
+  clientContext: z
+    .object({
+      sourceMessageId: z.string().optional(),
+      locale: z.string().optional(),
+    })
+    .optional(),
   profile: z
     .object({
       name: z.string().optional(),
@@ -39,6 +78,16 @@ const chatSchema = z.object({
       address: z.string().optional(),
     })
     .optional(),
+}).superRefine((value, ctx) => {
+  const hasMessage = value.message.trim().length > 0;
+  const hasAction = (value.actionPayload || "").trim().length > 0;
+  if (!hasMessage && !hasAction) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "message or actionPayload is required",
+      path: ["message"],
+    });
+  }
 });
 
 export function createApp(config: OpenClawConfig) {
@@ -46,6 +95,13 @@ export function createApp(config: OpenClawConfig) {
   const toolHttpClient = new HttpClient(config.timeoutMs);
   const llmHttpClient = new HttpClient(config.llmTimeoutMs);
   const llmClient = new LlmClient(config, llmHttpClient);
+  const handoffStore = new HandoffStore();
+  const dialogueStateStore = config.dialogEngineV2Enabled ? new DialogueStateStoreMySql(config) : null;
+  const dialogueEventLogger = dialogueStateStore ? new DialogueEventLoggerMySql(dialogueStateStore.getPool()) : null;
+
+  if (dialogueStateStore) {
+    dialogueStateStore.startCleanupJob();
+  }
 
   app.use(express.json({ limit: "1mb" }));
   app.use(
@@ -64,22 +120,59 @@ export function createApp(config: OpenClawConfig) {
       const payload = chatSchema.parse(req.body) as ChatRequest;
       const correlationId = payload.correlationId ?? randomUUID();
       const channel = payload.channel ?? "telegram";
-
-      if (channel === "messenger") {
-        res.json({
-          ok: true,
-          data: {
-            reply: messengerNotEnabledReply(),
-          },
-        });
-        return;
-      }
+      const messageText = payload.message.trim();
+      const actionPayload = (payload.actionPayload || "").trim() || undefined;
 
       const backend = buildBackend(channel as BackendChannel, config, toolHttpClient);
-      const classification = await classifyIntent(llmClient, payload.message);
-      const result = await handleIntent(config, llmClient, backend, payload, classification, correlationId);
+      let result: ChatResult | null = null;
 
-      res.json({ ok: true, data: result });
+      if (config.dialogEngineV2Enabled && dialogueStateStore && dialogueEventLogger) {
+        try {
+          result = await handleWithDialogueEngine(
+            config,
+            dialogueStateStore,
+            dialogueEventLogger,
+            backend,
+            {
+              ...payload,
+              message: messageText || actionPayload || "",
+              actionPayload,
+              channel,
+              correlationId,
+            },
+          );
+        } catch (error) {
+          req.log.error({ error: String(error) }, "dialogue engine v2 failed; fallback to legacy");
+        }
+      }
+
+      if (!result) {
+        const legacyMessage = legacyTextFromAction(messageText, actionPayload);
+        const legacyPayload: ChatRequest = {
+          ...payload,
+          message: legacyMessage,
+          actionPayload,
+          channel,
+        };
+        const classification = await classifyIntent(llmClient, legacyMessage);
+        if (await handoffStore.isActive(channel, payload.userId) && classification.intent !== "handoff_resume") {
+          await handoffStore.appendMessage(channel, payload.userId, "user", legacyMessage);
+          res.json({
+            ok: true,
+            data: normalizeChatResult(buildHandoffWaitingReply(channel)),
+          });
+          return;
+        }
+        result = await handleIntent(config, llmClient, backend, legacyPayload, classification, correlationId);
+
+        if (classification.intent === "handoff_request") {
+          await handoffStore.activate(channel, payload.userId, legacyMessage);
+        } else if (classification.intent === "handoff_resume") {
+          await handoffStore.release(channel, payload.userId);
+        }
+      }
+
+      res.json({ ok: true, data: normalizeChatResult(result) });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       req.log.error({ error: message }, "openclaw chat failed");
@@ -87,7 +180,125 @@ export function createApp(config: OpenClawConfig) {
     }
   });
 
+  app.get("/admin/handoff", async (req, res) => {
+    try {
+      const activeSessions = await handoffStore.getAllActiveSessions();
+      res.json({ ok: true, data: activeSessions });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  const replySchema = z.object({
+    channel: z.enum(["telegram", "web", "messenger"]),
+    userId: z.string().min(1),
+    message: z.string().min(1),
+  });
+
+  app.post("/admin/handoff/reply", async (req, res) => {
+    try {
+      const payload = replySchema.parse(req.body);
+      const session = await handoffStore.getSession(payload.channel, payload.userId);
+      if (!session) {
+        res.status(404).json({ ok: false, error: "Handoff session not active" });
+        return;
+      }
+
+      await handoffStore.appendMessage(payload.channel, payload.userId, "agent", payload.message);
+
+      if (payload.channel === "telegram" && config.telegramToken) {
+        const tgRes = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: payload.userId, text: payload.message }),
+        });
+        if (!tgRes.ok) {
+          req.log.error({ status: tgRes.status, body: await tgRes.text() }, "Telegram sendMessage failed");
+        }
+      } else if (payload.channel === "messenger" && config.messengerToken) {
+        const fbRes = await fetch(`https://graph.facebook.com/v21.0/me/messages?access_token=${config.messengerToken}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            recipient: { id: payload.userId },
+            message: { text: payload.message },
+          }),
+        });
+        if (!fbRes.ok) {
+          req.log.error({ status: fbRes.status, body: await fbRes.text() }, "Messenger sendMessage failed");
+        }
+      }
+
+      res.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      req.log.error({ error: message }, "admin handoff reply failed");
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
   return app;
+}
+
+async function handleWithDialogueEngine(
+  config: OpenClawConfig,
+  stateStore: DialogueStateStoreMySql,
+  eventLogger: DialogueEventLoggerMySql,
+  backend: ReturnType<typeof buildBackend>,
+  payload: ChatRequest & { channel: ChatChannel; correlationId: string },
+): Promise<ChatResult> {
+  const startedAt = Date.now();
+  const session = await stateStore.loadSession(payload.channel, payload.userId);
+  const engine = new DialoguePolicyEngine(config, backend);
+
+  const userEvent: DialogueEventLog = {
+    channel: payload.channel,
+    userId: payload.userId,
+    correlationId: payload.correlationId,
+    role: "user",
+    inputText: payload.message,
+    actionPayload: payload.actionPayload,
+    stateBefore: session.state,
+  };
+  await eventLogger.log(userEvent);
+
+  const result = await engine.run(
+    {
+      userId: payload.userId,
+      channel: payload.channel,
+      correlationId: payload.correlationId,
+      message: payload.message,
+      actionPayload: payload.actionPayload,
+      profile: payload.profile,
+    },
+    session,
+  );
+
+  await stateStore.saveSession(payload.channel, payload.userId, result.nextState, result.nextContext);
+
+  const latencyMs = Date.now() - startedAt;
+  const botEvent: DialogueEventLog = {
+    channel: payload.channel,
+    userId: payload.userId,
+    correlationId: payload.correlationId,
+    role: "bot",
+    inputText: result.reply,
+    actionPayload: payload.actionPayload,
+    intent: result.intent,
+    stateBefore: session.state,
+    stateAfter: result.nextState,
+    toolCallsJson: result.toolCalls?.length ? JSON.stringify(result.toolCalls) : undefined,
+    latencyMs,
+  };
+  await eventLogger.log(botEvent);
+
+  return {
+    reply: result.reply,
+    alerts: result.alerts,
+    ui: result.ui,
+    state: result.state,
+  };
 }
 
 async function classifyIntent(llmClient: LlmClient, message: string): Promise<IntentResult> {
@@ -97,27 +308,102 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
   const sku = message.toUpperCase().match(/[A-Z]{2,}-[A-Z0-9-]{2,}/)?.[0];
   const category = inferCategoryFromMessage(normalized);
 
+  if (containsAny(normalized, ["xin chao", "chao", "hello", "hi", "alo", "hey"]) && normalized.length <= 24) {
+    return { intent: "greeting" };
+  }
+
+  if (
+    containsAny(normalized, [
+      "ban lam duoc gi",
+      "bot lam duoc gi",
+      "lam duoc gi",
+      "co the lam gi",
+      "giup duoc gi",
+      "kha nang",
+      "huong dan su dung",
+      "tro giup",
+      "help",
+      "support",
+      "lenh",
+      "cach dat hang",
+    ])
+  ) {
+    return { intent: "bot_help" };
+  }
+
+  if (containsAny(normalized, [
+    "gap nhan vien",
+    "tu van vien",
+    "ho tro vien",
+    "nguoi that",
+    "noi chuyen nguoi that",
+    "human support",
+    "live agent",
+    "support staff",
+  ])) {
+    return { intent: "handoff_request" };
+  }
+
+  if (containsAny(normalized, [
+    "tiep tuc voi bot",
+    "bat lai bot",
+    "tro lai bot",
+    "resume bot",
+    "ket thuc ho tro",
+  ])) {
+    return { intent: "handoff_resume" };
+  }
+
   if (containsAny(normalized, ["bao quan", "han su dung", "co duong", "doi tra", "giao hang", "nhiet do", "thanh phan"])) {
     return { intent: "faq", sku };
   }
 
-  if (containsAny(normalized, ["menu", "do uong", "thuc uong", "san pham", "danh sach", "product", "products"])) {
+  if (containsAny(normalized, [
+    "menu",
+    "do uong",
+    "thuc uong",
+    "san pham",
+    "danh sach",
+    "product",
+    "products",
+    "mon nao",
+    "mon gi",
+    "co mon gi",
+    "co cac mon nao",
+    "co nhung mon nao",
+    "co gi uong",
+    "goi y mon",
+    "dat mon",
+    "dat nuoc",
+    "mua nuoc",
+    "oder",
+    "order",
+    "dat hang",
+    "mua hang",
+  ])) {
     const stripped = normalized
-      .replace(/\b(cho toi|cho minh|toi muon|minh muon|xem|danh sach|menu|do uong|thuc uong|san pham|products?)\b/g, " ")
+      .replace(
+        /\b(cho toi|cho minh|toi muon|minh muon|xem|danh sach|menu|do uong|thuc uong|san pham|products?|mon nao|mon gi|co mon gi|co cac mon nao|co nhung mon nao|co gi uong|goi y mon|dat mon|dat nuoc|mua nuoc|oder|order|dat hang|mua hang)\b/g,
+        " ",
+      )
       .replace(/\s+/g, " ")
       .trim();
     return { intent: "catalog_list", query: stripped.length >= 2 ? stripped : undefined, category };
+  }
+
+  if (category && normalized.length <= 20 && !/\d/.test(normalized)) {
+    return { intent: "catalog_list", category };
   }
 
   if (/\b(chi tiet|thong tin|product)\b/.test(normalized) && sku) {
     return { intent: "catalog_get", sku };
   }
 
-  if (/\b(ma don|order status|tinh trang don|kiem tra don)\b/.test(normalized) && orderCode) {
+  if (/\b(ma don|order status|tinh trang don|kiem tra don|kiem tra don hang)\b/.test(normalized)) {
     return { intent: "order_get", orderCode };
   }
 
-  if (/\b(thanh toan|chuyen khoan|payment)\b/.test(normalized) && orderCode) {
+  if (/\b(thanh toan|chuyen khoan|payment|huong dan thanh toan)\b/.test(normalized)) {
     return { intent: "payment_help", orderCode };
   }
 
@@ -126,11 +412,11 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
   }
 
   const classifierPrompt = [
-    "Ban la bo phan loai y dinh cho chatbot ban do uong.",
-    "Tra ve DUY NHAT JSON theo schema:",
-    '{"intent":"catalog_list|catalog_get|faq|order_get|order_create|payment_help|smalltalk","sku":"","orderCode":"","query":"","paymentMethod":"bank_transfer|cod"}',
-    "Khong giai thich them.",
-    `Tin nhan khach: ${message}`,
+    "Bạn là bộ phân loại ý định cho chatbot bán đồ uống.",
+    "Trả về DUY NHẤT JSON theo schema:",
+    '{"intent":"catalog_list|catalog_get|faq|order_get|order_create|payment_help|handoff_request|handoff_resume|greeting|bot_help|smalltalk","sku":"","orderCode":"","query":"","paymentMethod":"bank_transfer|cod"}',
+    "Không giải thích thêm.",
+    `Tin nhắn khách: ${message}`,
   ].join("\n");
 
   let raw = "";
@@ -139,7 +425,7 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
       [
         {
           role: "system",
-          content: "Ban chi duoc tra ve JSON hop le dung schema yeu cau.",
+          content: "Bạn chỉ được trả về JSON hợp lệ đúng schema yêu cầu.",
         },
         {
           role: "user",
@@ -167,7 +453,68 @@ async function handleIntent(
   payload: ChatRequest,
   classification: IntentResult,
   correlationId: string,
-): Promise<{ reply: string; alerts?: string[] }> {
+): Promise<ChatResult> {
+  const primarySuggestions = getPrimarySuggestions();
+
+  if (classification.intent === "handoff_request") {
+    const reply =
+      "Mình đã chuyển cuộc trò chuyện sang tư vấn viên. Bạn vui lòng chờ trong giây lát. " +
+      "Khi muốn quay lại bot, hãy nhắn: 'tiếp tục với bot'.";
+    return {
+      reply,
+      alerts: [
+        `[handoff] ${backend.channel}:${payload.userId} yeu cau tu van vien | msg="${payload.message.replace(/\s+/g, " ").slice(0, 120)}"`,
+      ],
+      ui: {
+        type: "menu",
+        title: "Hỗ trợ trực tiếp",
+        items: [],
+        suggestions: ["Tiếp tục với bot", "Xem menu", "Món cà phê"],
+      },
+    };
+  }
+
+  if (classification.intent === "handoff_resume") {
+    return {
+      reply: "Bot đã hoạt động lại. Bạn muốn mình hỗ trợ menu, tạo đơn hay kiểm tra đơn?",
+      ui: {
+        type: "menu",
+        title: "Bot đã sẵn sàng",
+        items: [],
+        suggestions: ["Xem menu", "Món cà phê", "Kiểm tra đơn hàng"],
+      },
+    };
+  }
+
+  if (classification.intent === "greeting") {
+    return {
+      reply: "Xin chào, mình là trợ lý đặt đồ uống của Lowland Coffee. Mình có thể gợi ý menu, tạo đơn và kiểm tra đơn cho bạn.",
+      ui: {
+        type: "menu",
+        title: "Bắt đầu nhanh",
+        items: [],
+        suggestions: primarySuggestions,
+      },
+    };
+  }
+
+  if (classification.intent === "bot_help") {
+    return {
+      reply:
+        "Mình hỗ trợ các việc sau:\n" +
+        "1) Xem menu: nhắn 'xem menu' hoặc 'món cà phê'.\n" +
+        "2) Lên đơn: ORDER SKU:SL | Họ tên | SĐT | Địa chỉ | bank_transfer|cod.\n" +
+        "3) Tra đơn: nhắn 'kiểm tra đơn ORD-YYYYMMDD-XXXX'.\n" +
+        "4) Gặp tư vấn viên: nhắn 'gặp tư vấn viên'.",
+      ui: {
+        type: "menu",
+        title: "Bạn muốn làm gì?",
+        items: [],
+        suggestions: ["Xem menu", "Món cà phê", "Kiểm tra đơn hàng", "Gặp tư vấn viên"],
+      },
+    };
+  }
+
   if (classification.intent === "catalog_list") {
     let list = await backend.postTool<{ items: Array<{ sku: string; name: string; category?: string; priceVnd: number; stockQty: number }> }>(
       "catalog_list",
@@ -184,19 +531,40 @@ async function handleIntent(
     }
 
     if (!list.data.items.length) {
-      return { reply: "Hien chua tim thay mon phu hop. Ban thu tu khoa khac nhe." };
+      return {
+        reply: "Hiện chưa tìm thấy món phù hợp. Bạn thử 'xem menu', 'món cà phê' hoặc 'món trà sữa' nhé.",
+        ui: {
+          type: "menu",
+          title: "Gợi ý truy vấn",
+          items: [],
+          suggestions: ["Xem menu", "Món cà phê", "Món trà sữa", "Nước ép"],
+        },
+      };
     }
 
-    const lines = list.data.items.map(
-      (item) => `- ${item.sku}: ${item.name} [${labelForCategory(item.category)}] | ${formatVnd(item.priceVnd)} | con ${item.stockQty}`,
-    );
-    const title = classification.category ? `Menu ${labelForCategory(classification.category)}:` : "Menu do uong:";
-    return { reply: `${title}\n${lines.join("\n")}` };
+    const title = classification.category ? `Dạ, tham khảo qua gợi ý món ${labelForCategory(classification.category).toLowerCase()} bên em nhé:` : "Dạ, đây là danh sách đồ uống nổi bật bên em mời anh/chị xem qua:";
+    return {
+      reply: title,
+      ui: {
+        type: "menu",
+        title: classification.category ? `Gợi ý ${labelForCategory(classification.category)}` : "Gợi ý đồ uống",
+        items: list.data.items.slice(0, 8),
+        suggestions: ["Xem menu", "Món cà phê", "Món trà sữa", "Gặp tư vấn viên"],
+      },
+    };
   }
 
   if (classification.intent === "catalog_get") {
     if (!classification.sku) {
-      return { reply: "Ban gui them ma SKU de minh tra thong tin chi tiet nhe." };
+      return {
+        reply: "Bạn gửi thêm mã SKU để mình tra thông tin chi tiết nhé. Ví dụ: CAFE-SUA-DA-L",
+        ui: {
+          type: "menu",
+          title: "Tra cứu sản phẩm",
+          items: [],
+          suggestions: ["Xem menu", "Món cà phê", "Món trà sữa"],
+        },
+      };
     }
 
     const detail = await backend.postTool<any>(
@@ -206,18 +574,40 @@ async function handleIntent(
     );
 
     if (!detail.data) {
-      return { reply: "Minh chua co thong tin san pham nay. Ban thu ma SKU khac hoac lien he tu van vien." };
+      return {
+        reply: "Mình chưa có thông tin sản phẩm này. Bạn thử mã SKU khác hoặc nhắn 'xem menu'.",
+        ui: {
+          type: "menu",
+          title: "Không tìm thấy SKU",
+          items: [],
+          suggestions: ["Xem menu", "Món cà phê", "Gặp tư vấn viên"],
+        },
+      };
     }
 
     const p = detail.data;
     return {
-      reply: `${p.name} (${p.sku})\nDanh muc: ${labelForCategory(p.category)}\nGia: ${formatVnd(p.priceVnd)}\nTon: ${p.stockQty}\nMo ta: ${p.description}`,
+      reply: `${p.name} (${p.sku})\nDanh mục: ${labelForCategory(p.category)}\nGiá: ${formatVnd(p.priceVnd)}\nTồn: ${p.stockQty}\nMô tả: ${p.description}`,
+      ui: {
+        type: "menu",
+        title: "Thông tin sản phẩm",
+        items: [],
+        suggestions: [`ORDER ${p.sku}:1`, "Xem menu", "Gặp tư vấn viên"],
+      },
     };
   }
 
   if (classification.intent === "order_get") {
     if (!classification.orderCode) {
-      return { reply: "Ban gui ma don theo dang ORD-YYYYMMDD-XXXX de minh kiem tra nhe." };
+      return {
+        reply: "Bạn gửi mã đơn theo dạng ORD-YYYYMMDD-XXXX để mình kiểm tra nhé.",
+        ui: {
+          type: "menu",
+          title: "Kiểm tra đơn hàng",
+          items: [],
+          suggestions: ["Kiểm tra đơn hàng", "Xem menu", "Gặp tư vấn viên"],
+        },
+      };
     }
 
     const order = await backend.postTool<any>(
@@ -227,15 +617,37 @@ async function handleIntent(
     );
 
     if (!order.data) {
-      return { reply: "Khong tim thay don hang nay." };
+      return {
+        reply: "Không tìm thấy đơn hàng này. Bạn kiểm tra lại mã đơn hoặc nhắn tư vấn viên nhé.",
+        ui: {
+          type: "menu",
+          title: "Không tìm thấy đơn",
+          items: [],
+          suggestions: ["Kiểm tra đơn hàng", "Xem menu", "Gặp tư vấn viên"],
+        },
+      };
     }
 
     if (order.data.customerTelegramId !== payload.userId) {
-      return { reply: "Ban khong co quyen xem don hang nay." };
+      return {
+        reply: "Bạn không có quyền xem đơn hàng này.",
+        ui: {
+          type: "menu",
+          title: "Không đủ quyền",
+          items: [],
+          suggestions: ["Gặp tư vấn viên", "Xem menu"],
+        },
+      };
     }
 
     return {
       reply: renderOrder(order.data),
+      ui: {
+        type: "menu",
+        title: "Đơn hàng của bạn",
+        items: [],
+        suggestions: ["Hướng dẫn thanh toán", "Xem menu", "Gặp tư vấn viên"],
+      },
     };
   }
 
@@ -244,7 +656,13 @@ async function handleIntent(
     if (!parsed.ok) {
       return {
         reply:
-          "De len don nhanh, ban gui theo mau:\nORDER SKU:SL,SKU:SL | Ho ten | So dien thoai | Dia chi | bank_transfer|cod\nVi du: ORDER CAFE-SUA-DA-L:2 | Nguyen Van A | 0909000001 | Ha Noi | bank_transfer",
+          "Để lên đơn nhanh, bạn gửi theo mẫu:\nORDER SKU:SL,SKU:SL | Họ tên | Số điện thoại | Địa chỉ | bank_transfer|cod\nVí dụ: ORDER CAFE-SUA-DA-L:2 | Nguyễn Văn A | 0909000001 | Hà Nội | bank_transfer",
+        ui: {
+          type: "menu",
+          title: "Mẫu đặt hàng",
+          items: [],
+          suggestions: ["Xem menu", "Món cà phê", "Gặp tư vấn viên"],
+        },
       };
     }
 
@@ -257,14 +675,23 @@ async function handleIntent(
 
     const paymentGuide =
       order.paymentMethod === "bank_transfer"
-        ? `\nThanh toan: ${config.bankName} - ${config.bankAccountNumber} (${config.bankAccountName}).\nNoi dung CK: ${order.orderCode}`
+        ? `\nThanh toán: ${config.bankName} - ${config.bankAccountNumber} (${config.bankAccountName}).\nNội dung CK: ${order.orderCode}`
         : "";
 
     return {
-      reply: `Da tao don ${order.orderCode} thanh cong. Tong thanh toan: ${formatVnd(order.totalVnd)}.${paymentGuide}`,
+      reply: `Đã tạo đơn ${order.orderCode} thành công. Tổng thanh toán: ${formatVnd(order.totalVnd)}.${paymentGuide}`,
+      ui: {
+        type: "menu",
+        title: "Đơn đã tạo",
+        items: [],
+        suggestions:
+          order.paymentMethod === "bank_transfer"
+            ? ["Hướng dẫn thanh toán", "Kiểm tra đơn hàng", "Xem menu"]
+            : ["Kiểm tra đơn hàng", "Xem menu", "Gặp tư vấn viên"],
+      },
       alerts:
         backend.channel === "telegram"
-          ? [`Don moi ${order.orderCode} | ${order.customerName} | ${formatVnd(order.totalVnd)} | ${order.status}`]
+          ? [`Đơn mới ${order.orderCode} | ${order.customerName} | ${formatVnd(order.totalVnd)} | ${order.status}`]
           : undefined,
     };
   }
@@ -272,10 +699,24 @@ async function handleIntent(
   if (classification.intent === "payment_help") {
     const orderCode = classification.orderCode;
     if (!orderCode) {
-      return { reply: "Ban gui ma don de minh huong dan thanh toan nhe." };
+      return {
+        reply: "Bạn gửi mã đơn để mình hướng dẫn thanh toán nhé. Ví dụ: ORD-20260302-0001",
+        ui: {
+          type: "menu",
+          title: "Thanh toán",
+          items: [],
+          suggestions: ["Kiểm tra đơn hàng", "Xem menu"],
+        },
+      };
     }
     return {
-      reply: `Vui long chuyen khoan vao ${config.bankName} - ${config.bankAccountNumber} (${config.bankAccountName}). Noi dung: ${orderCode}. Sau do gui /pay ${orderCode} <ma_giao_dich>.`,
+      reply: `Vui lòng chuyển khoản vào ${config.bankName} - ${config.bankAccountNumber} (${config.bankAccountName}). Nội dung: ${orderCode}. Sau đó gửi /pay ${orderCode} <mã_giao_dịch>.`,
+      ui: {
+        type: "menu",
+        title: "Hướng dẫn thanh toán",
+        items: [],
+        suggestions: ["Kiểm tra đơn hàng", "Gặp tư vấn viên"],
+      },
     };
   }
 
@@ -288,11 +729,25 @@ async function handleIntent(
     );
 
     if (!faq.data) {
-      return { reply: "Minh chua co thong tin chinh xac cho cau hoi nay. Ban vui long lien he tu van vien de ho tro them." };
+      return {
+        reply: "Mình chưa có thông tin chính xác cho câu hỏi này. Bạn vui lòng liên hệ tư vấn viên để được hỗ trợ thêm.",
+        ui: {
+          type: "menu",
+          title: "Hỗ trợ thêm",
+          items: [],
+          suggestions: ["Gặp tư vấn viên", "Xem menu", "Kiểm tra đơn hàng"],
+        },
+      };
     }
 
     return {
-      reply: `${faq.data.answer}\n(Nguon FAQ: ${faq.data.sourceQuestion})`,
+      reply: `${faq.data.answer}\n(Nguồn FAQ: ${faq.data.sourceQuestion})`,
+      ui: {
+        type: "menu",
+        title: "Câu trả lời FAQ",
+        items: [],
+        suggestions: ["Xem menu", "Món cà phê", "Gặp tư vấn viên"],
+      },
     };
   }
 
@@ -310,11 +765,11 @@ async function handleIntent(
         {
           role: "system",
           content:
-            "Ban la tro ly ban do uong. Chi duoc tra loi dua tren du lieu cung cap. Neu khong chac chan, phai noi: 'chua co thong tin'. Tra loi ngan gon bang tieng Viet co dau.",
+            "Bạn là trợ lý bán đồ uống. Chỉ được trả lời dựa trên dữ liệu cung cấp. Nếu không chắc chắn, phải nói: 'chưa có thông tin'. Trả lời ngắn gọn bằng tiếng Việt có dấu.",
         },
         {
           role: "user",
-          content: `Ngu canh san pham:\n${context}\n\nCau hoi khach: ${payload.message}`,
+          content: `Ngữ cảnh sản phẩm:\n${context}\n\nCâu hỏi khách: ${payload.message}`,
         },
       ],
       0.2,
@@ -325,7 +780,13 @@ async function handleIntent(
   }
 
   return {
-    reply: normalized || "Minh chua co thong tin chinh xac luc nay. Ban de lai cau hoi cu the hon nhe.",
+    reply: normalized || "Mình chưa có thông tin chính xác lúc này. Bạn để lại câu hỏi cụ thể hơn nhé.",
+    ui: {
+      type: "menu",
+      title: "Gợi ý tiếp theo",
+      items: [],
+      suggestions: primarySuggestions,
+    },
   };
 }
 
@@ -386,7 +847,7 @@ function renderOrder(order: any): string {
   const itemText = (order.items || [])
     .map((item: any) => `- ${item.sku} x${item.qty} = ${formatVnd(item.qty * item.unitPriceVnd)}`)
     .join("\n");
-  return `Don ${order.orderCode}\nTrang thai: ${order.status}\nTong: ${formatVnd(order.totalVnd)}\nSan pham:\n${itemText}`;
+  return `Đơn ${order.orderCode}\nTrạng thái: ${order.status}\nTổng: ${formatVnd(order.totalVnd)}\nSản phẩm:\n${itemText}`;
 }
 
 function formatVnd(value: number): string {
@@ -408,6 +869,10 @@ function containsAny(source: string, patterns: string[]): boolean {
   return patterns.some((pattern) => source.includes(pattern));
 }
 
+function getPrimarySuggestions(): string[] {
+  return ["Xem menu", "Món cà phê", "Kiểm tra đơn hàng", "Gặp tư vấn viên"];
+}
+
 function inferCategoryFromMessage(normalized: string): string | undefined {
   if (containsAny(normalized, ["ca phe", "bac xiu", "espresso", "latte"])) {
     return "coffee";
@@ -415,7 +880,7 @@ function inferCategoryFromMessage(normalized: string): string | undefined {
   if (containsAny(normalized, ["tra sua", "milk tea"])) {
     return "milk_tea";
   }
-  if (containsAny(normalized, ["tra dao", "tra vai", "tra", "fruit tea"])) {
+  if (containsAny(normalized, ["tra dao", "tra vai", "tra sua", "tra trai cay", "hong tra", "oolong", "fruit tea"])) {
     return "fruit_tea";
   }
   if (containsAny(normalized, ["nuoc ep", "juice"])) {
@@ -473,4 +938,123 @@ function extractFirstJsonObject(raw: string): string | null {
     }
   }
   return null;
+}
+
+function normalizeChatResult(result: ChatResult): ChatResult {
+  if (!result.ui?.suggestions?.length) {
+    return result;
+  }
+
+  const suggestions = result.ui.suggestions
+    .map((entry) => normalizeSuggestion(entry))
+    .filter((entry): entry is UiSuggestion => Boolean(entry));
+
+  return {
+    ...result,
+    ui: {
+      ...result.ui,
+      suggestions,
+    },
+  };
+}
+
+function normalizeSuggestion(entry: string | UiSuggestion): UiSuggestion | null {
+  if (typeof entry === "object" && entry && typeof entry.label === "string" && typeof entry.payload === "string") {
+    return {
+      label: entry.label.trim(),
+      payload: entry.payload.trim(),
+    };
+  }
+
+  if (typeof entry !== "string") {
+    return null;
+  }
+
+  const label = entry.trim();
+  if (!label) {
+    return null;
+  }
+
+  return {
+    label,
+    payload: legacySuggestionPayload(label),
+  };
+}
+
+function legacySuggestionPayload(label: string): string {
+  const normalized = normalizeVietnamese(label);
+  if (containsAny(normalized, ["xem menu", "menu", "mon nao", "do uong"])) {
+    return "ACTION_VIEW_MENU";
+  }
+  if (containsAny(normalized, ["ca phe"])) {
+    return "ACTION_CATEGORY:coffee";
+  }
+  if (containsAny(normalized, ["tra sua"])) {
+    return "ACTION_CATEGORY:milk_tea";
+  }
+  if (containsAny(normalized, ["tra trai cay", "tra dao", "tra vai"])) {
+    return "ACTION_CATEGORY:fruit_tea";
+  }
+  if (containsAny(normalized, ["nuoc ep"])) {
+    return "ACTION_CATEGORY:juice";
+  }
+  if (containsAny(normalized, ["kiem tra don"])) {
+    return "ACTION_ORDER_STATUS";
+  }
+  if (containsAny(normalized, ["tiep tuc voi bot"])) {
+    return "ACTION_HANDOFF_RESUME";
+  }
+  if (containsAny(normalized, ["tu van vien", "nguoi that"])) {
+    return "ACTION_HANDOFF_REQUEST";
+  }
+  if (containsAny(normalized, ["dat don", "dat hang"])) {
+    return "ACTION_ORDER_START";
+  }
+  return label;
+}
+
+function legacyTextFromAction(messageText: string, actionPayload?: string): string {
+  if (messageText.trim()) {
+    return messageText.trim();
+  }
+  const raw = (actionPayload || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  if (raw === "ACTION_VIEW_MENU") return "xem menu";
+  if (raw === "ACTION_HELP") return "bot lam duoc gi";
+  if (raw === "ACTION_ORDER_START") return "dat hang";
+  if (raw === "ACTION_ORDER_STATUS") return "kiem tra don hang";
+  if (raw === "ACTION_HANDOFF_REQUEST") return "gap tu van vien";
+  if (raw === "ACTION_HANDOFF_RESUME") return "tiep tuc voi bot";
+  if (raw.startsWith("ACTION_CATEGORY:")) {
+    const category = raw.slice("ACTION_CATEGORY:".length);
+    if (category === "coffee") return "mon ca phe";
+    if (category === "milk_tea") return "mon tra sua";
+    if (category === "fruit_tea") return "mon tra trai cay";
+    if (category === "juice") return "nuoc ep";
+    return "xem menu";
+  }
+  if (raw.startsWith("ACTION_ORDER_ADD:")) {
+    const sku = raw.slice("ACTION_ORDER_ADD:".length).trim();
+    if (sku) {
+      return `ORDER ${sku}:1 | Khach le | 0900000000 | Dia chi mac dinh | cod`;
+    }
+  }
+
+  return raw;
+}
+
+function buildHandoffWaitingReply(channel: ChatChannel): ChatResult {
+  const channelLabel = channel === "messenger" ? "Messenger" : channel === "telegram" ? "Telegram" : "web";
+  return {
+    reply: `Phiên ${channelLabel} của bạn đang được tư vấn viên tiếp nhận. Nhắn 'tiếp tục với bot' để quay lại bot tự động.`,
+    ui: {
+      type: "menu",
+      title: "Đang chờ tư vấn viên",
+      items: [],
+      suggestions: ["Tiếp tục với bot", "Xem menu"],
+    },
+  };
 }

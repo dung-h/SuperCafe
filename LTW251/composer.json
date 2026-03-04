@@ -4,7 +4,8 @@
     "type": "project",
     "require": {
         "php": ">=8.2",
-        "phpmailer/phpmailer": "^6.9"
+        "phpmailer/phpmailer": "^6.9",
+        "predis/predis": "^3.4"
     },
     "autoload": {
         "psr-4": {

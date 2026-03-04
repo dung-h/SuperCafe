@@ -420,11 +420,9 @@ class BotBridgeController extends BaseController {
   }
 
   private function safeBotEmail($chatUserId) {
-    $normalized = preg_replace('/[^a-zA-Z0-9\-_.]/', '-', $chatUserId);
-    if ($normalized === null || $normalized === '') {
-      $normalized = 'guest';
-    }
-    return strtolower($normalized) . '@bot.local';
+    // Bot order flow currently does not collect customer email.
+    // Keep this blank instead of generating synthetic guest emails.
+    return '';
   }
 
   private function getBotOrderByCode($pdo, $orderCode) {
@@ -461,4 +459,3 @@ class BotBridgeController extends BaseController {
     ];
   }
 }
-

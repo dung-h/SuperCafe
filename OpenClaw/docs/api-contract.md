@@ -57,9 +57,14 @@ Base URL: `http://openclaw:8082`
     ```json
     {
       "userId": "123",
-      "message": "toi muon dat 2 goi CF-ARABICA-250",
+      "message": "toi muon dat don",
+      "actionPayload": "ACTION_ORDER_START",
       "channel": "telegram|web|messenger",
       "correlationId": "optional",
+      "clientContext": {
+        "sourceMessageId": "optional",
+        "locale": "vi-VN"
+      },
       "profile": {
         "name": "Nguyen Van A",
         "phone": "0909000001",
@@ -70,8 +75,41 @@ Base URL: `http://openclaw:8082`
   - `channel`:
     - `telegram` (default, backend `sales-mcp`)
     - `web` (backend bridge URL `WEB_BRIDGE_BASE_URL`)
-    - `messenger` (stub phase, chua bat webhook thuc)
-  - response: `{ ok: true, data: { reply: string, alerts?: string[] } }`
+    - `messenger` (backend bridge URL `WEB_BRIDGE_BASE_URL`)
+  - `message` hoac `actionPayload` bat buoc co it nhat 1 truong.
+  - response:
+    ```json
+    {
+      "ok": true,
+      "data": {
+        "reply": "Ban muon lam gi tiep theo?",
+        "alerts": [],
+        "ui": {
+          "type": "menu",
+          "title": "Tuy chon",
+          "items": [],
+          "suggestions": [
+            { "label": "Xem menu", "payload": "ACTION_VIEW_MENU" },
+            { "label": "Ca phe", "payload": "ACTION_CATEGORY:coffee" }
+          ]
+        },
+        "state": {
+          "name": "ORDER_COLLECT_PHONE",
+          "missingFields": ["phone"]
+        }
+      }
+    }
+    ```
+  - `ui.suggestions` da chuan hoa theo object `{label,payload}` cho tat ca channels.
+  - payload dac biet cho UX review don:
+    - `OPEN_WEB_REVIEW:<SKU:QTY,SKU:QTY,...>`
+    - adapter channel se map payload nay thanh nut mo URL web review (khong gui callback ve bot).
+  - action payload uu tien cao hon text intent trong engine v2.
+  - ho tro handoff:
+    - neu nguoi dung nhan tin dang \"gap tu van vien\", bot vao che do handoff.
+    - engine v2: che do handoff duoc luu trong MySQL session state.
+    - legacy handoff (fallback): giu session theo Redis TTL.
+    - nhan \"tiep tuc voi bot\" de thoat handoff va quay lai bot tu dong.
 
 ## Telegram Gateway
 Base URL: `http://telegram-gateway:8083`

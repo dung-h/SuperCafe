@@ -19,6 +19,19 @@ describe("parseClassifierJson", () => {
     expect(parsed.paymentMethod).toBeUndefined();
   });
 
+  it("parses handoff classifier output", () => {
+    const raw = JSON.stringify({
+      intent: "handoff_request",
+      query: "",
+      sku: "",
+      orderCode: "",
+      paymentMethod: "",
+    });
+
+    const parsed = parseClassifierJson(raw);
+    expect(parsed.intent).toBe("handoff_request");
+  });
+
   it("throws on invalid intent", () => {
     const raw = JSON.stringify({ intent: "unknown", query: "" });
     expect(() => parseClassifierJson(raw)).toThrow();

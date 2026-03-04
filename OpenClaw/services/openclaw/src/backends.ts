@@ -1,7 +1,7 @@
 import type { HttpClient } from "./clients";
 import type { OpenClawConfig } from "./config";
 
-export type BackendChannel = "telegram" | "web";
+export type BackendChannel = "telegram" | "web" | "messenger";
 
 type ToolName =
   | "catalog_list"
@@ -42,7 +42,7 @@ export function buildBackend(
   config: OpenClawConfig,
   httpClient: HttpClient,
 ): SalesBackend {
-  if (channel === "web") {
+  if (channel === "web" || channel === "messenger") {
     return {
       channel,
       postTool: async <T>(tool: ToolName, body: unknown, correlationId: string) =>
@@ -70,4 +70,3 @@ export function buildBackend(
       ),
   };
 }
-

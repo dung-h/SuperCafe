@@ -19,6 +19,9 @@
 OpenClaw/infra/env/*.env
 !OpenClaw/infra/env/.env.example
 
+# Local handover notes
+GPT.md
+
 # PHP uploads/artifacts
 LTW251/public/uploads/tmp/
 LTW251/.git_ltw251_backup/

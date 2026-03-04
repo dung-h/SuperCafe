@@ -5,7 +5,7 @@ services:
       dockerfile: services/sales-mcp/Dockerfile
     container_name: openclaw-sales-mcp
     env_file:
-      - ./infra/env/.env
+      - ../.env
     environment:
       SQLITE_PATH: /data/sales.db
       SALES_MCP_HOST: 0.0.0.0
@@ -27,13 +27,22 @@ services:
       dockerfile: services/openclaw/Dockerfile
     container_name: openclaw-agent
     env_file:
-      - ./infra/env/.env
+      - ../.env
     environment:
       OPENCLAW_HOST: 0.0.0.0
       OPENCLAW_PORT: 8082
       SALES_MCP_URL: http://sales-mcp:8081
-      WEB_BRIDGE_BASE_URL: ${WEB_BRIDGE_BASE_URL:-http://localhost:9999}
+      WEB_BRIDGE_BASE_URL: ${WEB_BRIDGE_BASE_URL:-http://host.docker.internal:9999}
       WEB_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
+      OPENCLAW_DB_HOST: ${OPENCLAW_DB_HOST:-host.docker.internal}
+      OPENCLAW_DB_PORT: ${OPENCLAW_DB_PORT:-3307}
+      OPENCLAW_DB_NAME: ${OPENCLAW_DB_NAME:-lowland_coffee}
+      OPENCLAW_DB_USER: ${OPENCLAW_DB_USER:-web251}
+      OPENCLAW_DB_PASS: ${OPENCLAW_DB_PASS:-Webhk251!}
+      DIALOG_ENGINE_V2_ENABLED: ${DIALOG_ENGINE_V2_ENABLED:-false}
+      DIALOG_SESSION_TTL_HOURS: ${DIALOG_SESSION_TTL_HOURS:-24}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       sales-mcp:
         condition: service_healthy
@@ -52,7 +61,7 @@ services:
       dockerfile: services/telegram-gateway/Dockerfile
     container_name: openclaw-telegram-gateway
     env_file:
-      - ./infra/env/.env
+      - ../.env
     environment:
       TELEGRAM_GATEWAY_HOST: 0.0.0.0
       TELEGRAM_GATEWAY_PORT: 8083
@@ -79,7 +88,7 @@ services:
       dockerfile: services/telegram-miniapp/Dockerfile
     container_name: openclaw-telegram-miniapp
     env_file:
-      - ./infra/env/.env
+      - ../.env
     environment:
       TELEGRAM_MINIAPP_HOST: 0.0.0.0
       TELEGRAM_MINIAPP_PORT: 8084

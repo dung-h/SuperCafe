@@ -5,7 +5,15 @@
     <h5>Thông tin khách hàng</h5>
     <p><strong>Họ tên:</strong> <?= htmlspecialchars($order['customer_name'], ENT_QUOTES, 'UTF-8') ?></p>
     <p><strong>Điện thoại:</strong> <?= htmlspecialchars($order['customer_phone'] ?? '', ENT_QUOTES, 'UTF-8') ?></p>
-    <p><strong>Email:</strong> <?= htmlspecialchars($order['customer_email'], ENT_QUOTES, 'UTF-8') ?></p>
+    <p>
+      <strong>Email:</strong>
+      <?php $detailEmail = trim((string)($order['customer_email'] ?? '')); ?>
+      <?php if ($detailEmail !== ''): ?>
+        <?= htmlspecialchars($detailEmail, ENT_QUOTES, 'UTF-8') ?>
+      <?php else: ?>
+        <span class="text-muted fst-italic">Khách vãng lai (không email)</span>
+      <?php endif; ?>
+    </p>
     <p><strong>Địa chỉ:</strong> <?= htmlspecialchars($order['customer_address'] ?? '', ENT_QUOTES, 'UTF-8') ?></p>
     <p><strong>Ngày đặt:</strong> <?= date('d/m/Y H:i', strtotime($order['created_at'])) ?></p>
   </div>

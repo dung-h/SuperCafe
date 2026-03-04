@@ -34,8 +34,8 @@ services:
       DB_NAME: lowland_coffee
       DB_USER: web251
       DB_PASS: Webhk251!
-      BASE_URL: http://localhost:9999
-      BOT_BRIDGE_API_KEY: dev-bridge-key-change-me
+      BASE_URL: ${PUBLIC_BASE_URL:-}
+      BOT_BRIDGE_API_KEY: ${WEB_BRIDGE_API_KEY:-dev-bridge-key-change-me}
       OPENCLAW_URL: http://host.docker.internal:8082
       OPENCLAW_TIMEOUT_MS: 20000
       MESSENGER_VERIFY_TOKEN: change-me-messenger-verify-token

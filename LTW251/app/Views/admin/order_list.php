@@ -40,14 +40,21 @@
         <tr>
           <td><?= (int)$o['id'] ?></td>
           <td><?= htmlspecialchars($o['customer_name'], ENT_QUOTES, 'UTF-8') ?></td>
-          <td><?= htmlspecialchars($o['customer_email'], ENT_QUOTES, 'UTF-8') ?></td>
+          <td>
+            <?php $email = trim((string)($o['customer_email'] ?? '')); ?>
+            <?php if ($email !== ''): ?>
+              <?= htmlspecialchars($email, ENT_QUOTES, 'UTF-8') ?>
+            <?php else: ?>
+              <span class="text-muted fst-italic">Khách vãng lai (không email)</span>
+            <?php endif; ?>
+          </td>
           <td>
             <?php
               $badges = [
-                'pending' => 'bg-primary',
-                'processing' => 'bg-warning',
-                'completed' => 'bg-success',
-                'cancelled' => 'bg-danger'
+                'pending' => 'order-status-badge order-status-pending',
+                'processing' => 'order-status-badge order-status-processing',
+                'completed' => 'order-status-badge order-status-completed',
+                'cancelled' => 'order-status-badge order-status-cancelled'
               ];
               $labels = [
                 'pending' => 'Chờ xử lý',
@@ -56,7 +63,7 @@
                 'cancelled' => 'Đã hủy'
               ];
             ?>
-            <span class="badge <?= $badges[$o['status']] ?? 'bg-secondary' ?>">
+            <span class="<?= $badges[$o['status']] ?? 'order-status-badge bg-secondary text-white' ?>">
               <?= $labels[$o['status']] ?? htmlspecialchars($o['status'], ENT_QUOTES, 'UTF-8') ?>
             </span>
           </td>
@@ -84,4 +91,3 @@
     </ul>
   </nav>
 <?php endif; ?>
-

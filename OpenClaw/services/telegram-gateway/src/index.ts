@@ -1,4 +1,4 @@
-﻿import { randomUUID } from "node:crypto";
+﻿import { createHmac, randomUUID } from "node:crypto";
 import express from "express";
 import { Markup, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
@@ -7,6 +7,23 @@ import { logger } from "./logger";
 import { getArgs, parseOrderCommand } from "./parsers";
 
 type ApiResult<T> = { ok: boolean; data: T; error?: string };
+type OpenClawSuggestion = { label: string; payload: string };
+type OpenClawChatData = {
+  reply: string;
+  alerts?: string[];
+  ui?: {
+    type: "menu";
+    title?: string;
+    items?: Array<{
+      sku: string;
+      name: string;
+      category?: string;
+      priceVnd?: number;
+      stockQty?: number;
+    }>;
+    suggestions?: Array<OpenClawSuggestion | string>;
+  };
+};
 
 type BotContext = {
   adminSessions: Map<string, number>;
@@ -24,7 +41,7 @@ const config = readConfig();
 if (config.salesMcpApiKey === "dev-internal-key-change-me") {
   logger.warn("SALES_MCP_API_KEY is using default value; change it for non-demo environments.");
 }
-const MAIN_MENU_KEYBOARD = buildMainMenuKeyboard(config.miniAppUrl);
+const MAIN_MENU_KEYBOARD = buildMainMenuKeyboard();
 const bot = new Telegraf(config.token);
 const state: BotContext = {
   adminSessions: new Map(),
@@ -501,6 +518,43 @@ bot.command("stock_set", async (ctx) => {
   await ctx.reply(`Đã cập nhật tồn ${result.data.sku} = ${result.data.stockQty}.`, MAIN_MENU_KEYBOARD);
 });
 
+bot.on("callback_query", async (ctx) => {
+  const callbackData = "data" in ctx.callbackQuery ? String(ctx.callbackQuery.data || "").trim() : "";
+  if (!callbackData) {
+    await ctx.answerCbQuery("Dữ liệu không hợp lệ");
+    return;
+  }
+
+  const correlationId = `tg-cb-${randomUUID().slice(0, 8)}`;
+  const response = await postOpenClaw<OpenClawChatData>(
+    "/chat",
+    {
+      userId: String(ctx.from.id),
+      message: callbackData,
+      actionPayload: callbackData,
+      channel: "telegram",
+      correlationId,
+      clientContext: {
+        sourceMessageId: String((ctx.callbackQuery as any).message?.message_id || ""),
+        locale: "vi-VN",
+      },
+      profile: {
+        name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || undefined,
+      },
+    },
+    correlationId,
+  );
+
+  if (!response.ok) {
+    await ctx.answerCbQuery("Lỗi hệ thống", { show_alert: true });
+    await ctx.reply(`Hệ thống tạm lỗi: ${response.error}`, MAIN_MENU_KEYBOARD);
+    return;
+  }
+
+  await ctx.answerCbQuery();
+  await sendOpenClawReply(ctx, response.data);
+});
+
 bot.on(message("text"), async (ctx) => {
   const text = ctx.message.text.trim();
   if (!text || text.startsWith("/")) {
@@ -547,12 +601,25 @@ bot.on(message("text"), async (ctx) => {
   }
 
   const correlationId = buildCorrelationId(ctx.message.message_id);
-  const response = await postOpenClaw<{ reply: string; alerts?: string[] }>(
+
+  // UX Enhancement: Send native typing indicator while waiting for LLM
+  try {
+    await ctx.sendChatAction("typing");
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Failed to send typing action to Telegram");
+  }
+
+  const response = await postOpenClaw<OpenClawChatData>(
     "/chat",
     {
       userId: String(ctx.from.id),
       message: text,
+      channel: "telegram",
       correlationId,
+      clientContext: {
+        sourceMessageId: String(ctx.message.message_id),
+        locale: "vi-VN",
+      },
       profile: {
         name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || undefined,
       },
@@ -565,13 +632,131 @@ bot.on(message("text"), async (ctx) => {
     return;
   }
 
-  await ctx.reply(response.data.reply, MAIN_MENU_KEYBOARD);
-  if (response.data.alerts?.length) {
-    for (const alert of response.data.alerts) {
+  await sendOpenClawReply(ctx, response.data);
+});
+
+async function sendOpenClawReply(ctx: any, data: OpenClawChatData): Promise<void> {
+  const suggestions = normalizeSuggestions(data.ui?.suggestions);
+  const menuItems = normalizeUiItems(data.ui?.items);
+  if (menuItems.length) {
+    await sendOpenClawMenuReply(ctx, data.reply, menuItems, suggestions);
+  } else if (suggestions.length) {
+    await ctx.reply(data.reply, Markup.inlineKeyboard(buildInlineButtons(ctx, suggestions)));
+  } else {
+    await ctx.reply(data.reply, MAIN_MENU_KEYBOARD);
+  }
+
+  if (data.alerts?.length) {
+    for (const alert of data.alerts) {
       await sendAdminAlert(alert);
     }
   }
-});
+}
+
+function normalizeSuggestions(raw?: Array<OpenClawSuggestion | string>): OpenClawSuggestion[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const normalized: OpenClawSuggestion[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string") {
+      const text = entry.trim();
+      if (text) {
+        normalized.push({ label: text, payload: text });
+      }
+      continue;
+    }
+
+    const label = String(entry.label || "").trim();
+    const payload = String(entry.payload || "").trim();
+    if (label && payload) {
+      normalized.push({ label, payload });
+    }
+  }
+  return normalized;
+}
+
+function normalizeUiItems(raw?: Array<{ sku?: string; name?: string; category?: string; priceVnd?: number; stockQty?: number }>): Array<{
+  sku: string;
+  name: string;
+  category?: string;
+  priceVnd: number;
+  stockQty: number;
+}> {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => ({
+      sku: String(item?.sku || "").trim().toUpperCase(),
+      name: String(item?.name || "").trim(),
+      category: item?.category ? String(item.category).trim() : undefined,
+      priceVnd: Number(item?.priceVnd || 0),
+      stockQty: Number(item?.stockQty || 0),
+    }))
+    .filter((item) => item.sku !== "" && item.name !== "");
+}
+
+async function sendOpenClawMenuReply(
+  ctx: any,
+  replyText: string,
+  items: Array<{ sku: string; name: string; category?: string; priceVnd: number; stockQty: number }>,
+  suggestions: OpenClawSuggestion[],
+): Promise<void> {
+  const previewItems = items.slice(0, 8);
+  const lines = previewItems.map(
+    (item, index) =>
+      `${index + 1}. ${item.name} (${item.sku}) • ${formatVnd(item.priceVnd)} • còn ${Math.max(0, item.stockQty)}`,
+  );
+
+  const text = `${replyText}\n\n${lines.join("\n")}`;
+  const keyboardRows: any[][] = previewItems.map((item) => [
+    Markup.button.callback(`➕ ${truncateLabel(item.name, 26)}`, `ACTION_ORDER_ADD:${item.sku}`),
+  ]);
+
+  const quickRows = chunkArray(suggestions.slice(0, 6), 2).map((row) =>
+    row.map((entry) => buildInlineButtonFromSuggestion(ctx?.from, entry)),
+  );
+  keyboardRows.push(...quickRows);
+
+  const miniAppUrl = buildMiniAppUrlForUser(ctx?.from);
+  if (miniAppUrl) {
+    keyboardRows.push([Markup.button.url("🌐 Xem menu web", miniAppUrl)]);
+  }
+
+  await ctx.reply(text, Markup.inlineKeyboard(keyboardRows));
+}
+
+function buildInlineButtons(ctx: any, suggestions: OpenClawSuggestion[]): any[][] {
+  const rows: any[][] = [];
+  for (let i = 0; i < suggestions.length && i < 8; i += 2) {
+    const row: any[] = [];
+    const first = suggestions[i];
+    row.push(buildInlineButtonFromSuggestion(ctx?.from, first));
+    const second = suggestions[i + 1];
+    if (second) {
+      row.push(buildInlineButtonFromSuggestion(ctx?.from, second));
+    }
+    rows.push(row);
+  }
+  const miniAppUrl = buildMiniAppUrlForUser(ctx?.from);
+  if (miniAppUrl) {
+    rows.push([Markup.button.url("🌐 Xem menu web", miniAppUrl)]);
+  }
+  return rows;
+}
+
+function buildInlineButtonFromSuggestion(
+  from: { id?: number; first_name?: string; last_name?: string; username?: string } | undefined,
+  suggestion: OpenClawSuggestion,
+): any {
+  const reviewUrl = buildOrderReviewUrlForUser(from, suggestion.payload);
+  if (reviewUrl) {
+    return Markup.button.url(suggestion.label, reviewUrl);
+  }
+  return Markup.button.callback(suggestion.label, suggestion.payload);
+}
 
 const healthApp = express();
 healthApp.get("/health", (_req, res) => {
@@ -653,16 +838,24 @@ async function showProducts(ctx: any, query?: string, withGuide?: boolean, categ
     return;
   }
 
-  const lines = result.data.items.map(
-    (item) => `- ${item.sku}: ${item.name} [${labelForCategory(item.category)}] | ${formatVnd(item.priceVnd)} | còn ${item.stockQty}`,
+  const previewItems = result.data.items.slice(0, 8);
+  const lines = previewItems.map(
+    (item, index) => `${index + 1}. ${item.name} (${item.sku}) • ${formatVnd(item.priceVnd)} • còn ${item.stockQty}`,
   );
 
   const title = category ? `Menu ${labelForCategory(category)}:` : "Menu đồ uống hiện có:";
-  const guide = withGuide
-    ? "\n\nĐặt món nhanh: /order SKU:SL,SKU:SL | Họ tên | Số điện thoại | Địa chỉ | bank_transfer|cod"
-    : "";
+  const guide = withGuide ? "\n\nTip: Bấm nút để thêm món nhanh, hoặc mở menu web để xem trực quan hơn." : "";
+  const totalHint = result.data.items.length > previewItems.length ? `\n(Hiển thị ${previewItems.length}/${result.data.items.length} món đầu)` : "";
+  const keyboardRows: any[][] = previewItems.map((item) => [
+    Markup.button.callback(`➕ ${truncateLabel(item.name, 26)}`, `ACTION_ORDER_ADD:${item.sku}`),
+  ]);
+  keyboardRows.push([Markup.button.callback("🧾 Bắt đầu wizard đặt đơn", "ACTION_ORDER_START")]);
+  const miniAppUrl = buildMiniAppUrlForUser(ctx.from);
+  if (miniAppUrl) {
+    keyboardRows.push([Markup.button.url("🌐 Mở menu web", miniAppUrl)]);
+  }
 
-  await ctx.reply(`${title}\n${lines.join("\n")}${guide}`, MAIN_MENU_KEYBOARD);
+  await ctx.reply(`${title}\n${lines.join("\n")}${totalHint}${guide}`, Markup.inlineKeyboard(keyboardRows));
 }
 
 async function showCategories(ctx: any): Promise<void> {
@@ -747,14 +940,10 @@ async function sendAdminAlert(messageText: string): Promise<void> {
 async function launchBotWithRetry(): Promise<void> {
   while (true) {
     try {
-      await withTimeout(
-        bot.launch({
-          dropPendingUpdates: false,
-          allowedUpdates: ["message"],
-        }),
-        20000,
-        "telegram bot launch timeout",
-      );
+      await bot.launch({
+        dropPendingUpdates: false,
+        allowedUpdates: ["message", "callback_query"],
+      });
       await configureMiniAppMenuButton();
       const me = await bot.telegram.getMe();
       logger.info(
@@ -773,21 +962,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(label)), timeoutMs);
-    task
-      .then((result) => {
-        clearTimeout(timer);
-        resolve(result);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
 function normalizeAdminPassphrase(raw: string): string {
   const value = raw.trim();
   const startsWithQuote = value.startsWith("\"") || value.startsWith("'");
@@ -798,34 +972,33 @@ function normalizeAdminPassphrase(raw: string): string {
   return value;
 }
 
-function buildMainMenuKeyboard(miniAppUrl?: string) {
+function buildMainMenuKeyboard() {
   const rows: any[] = [];
-  if (miniAppUrl) {
-    rows.push([Markup.button.webApp("Mở cửa hàng", miniAppUrl), "Xem menu đồ uống"]);
-    rows.push(["Danh mục đồ uống", "Đặt món nhanh"]);
-    rows.push(["Kiểm tra đơn hàng", "Hướng dẫn thanh toán"]);
-  } else {
-    rows.push(["Xem menu đồ uống", "Đặt món nhanh"]);
-    rows.push(["Danh mục đồ uống", "Kiểm tra đơn hàng"]);
-    rows.push(["Hướng dẫn thanh toán"]);
-  }
+  rows.push(["Xem menu đồ uống", "Danh mục đồ uống"]);
+  rows.push(["Đặt món nhanh", "Kiểm tra đơn hàng"]);
+  rows.push(["Hướng dẫn thanh toán", "Mở cửa hàng"]);
   return Markup.keyboard(rows).resize();
 }
 
 async function sendMiniAppLaunch(ctx: any): Promise<void> {
-  if (!config.miniAppUrl) {
+  const miniAppUrl = buildMiniAppUrlForUser(ctx.from);
+  if (!miniAppUrl) {
     await ctx.reply("Mini App chưa được cấu hình URL công khai.", MAIN_MENU_KEYBOARD);
     return;
   }
 
   await ctx.reply(
-    `Nhấn nút Mở cửa hàng để vào Mini App.\nLink trực tiếp: ${config.miniAppUrl}`,
-    Markup.keyboard([[Markup.button.webApp("Mở cửa hàng", config.miniAppUrl)]]).resize(),
+    `Nhấn nút bên dưới để mở menu web trực quan.\nLink trực tiếp: ${miniAppUrl}`,
+    Markup.keyboard([[Markup.button.webApp("Mở cửa hàng", miniAppUrl)], ["Xem menu đồ uống", "Đặt món nhanh"]]).resize(),
   );
 }
 
 async function configureMiniAppMenuButton(): Promise<void> {
   if (!config.miniAppUrl) {
+    return;
+  }
+  if (config.webSessionSecret) {
+    logger.info("Skip setChatMenuButton because web session token is per-user; use keyboard button 'Mở cửa hàng'.");
     return;
   }
 
@@ -880,6 +1053,113 @@ function translatePaymentError(error?: string): string {
   return error || "Lỗi không xác định";
 }
 
+function truncateLabel(value: string, maxLength: number): string {
+  const text = value.trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
+function buildMiniAppUrlForUser(from?: { id?: number; first_name?: string; last_name?: string; username?: string }): string | undefined {
+  if (!config.miniAppUrl) {
+    return undefined;
+  }
+
+  const url = new URL(config.miniAppUrl);
+  if (!from || !from.id) {
+    return url.toString();
+  }
+
+  const token = buildTelegramSessionToken({
+    id: from.id,
+    first_name: from.first_name,
+    last_name: from.last_name,
+    username: from.username,
+  });
+  if (token) {
+    url.searchParams.set("tg_session", token);
+    url.searchParams.set("src", "telegram");
+  }
+  return url.toString();
+}
+
+function buildOrderReviewUrlForUser(
+  from: { id?: number; first_name?: string; last_name?: string; username?: string } | undefined,
+  payload: string,
+): string | undefined {
+  const prefix = "OPEN_WEB_REVIEW:";
+  if (!payload || !payload.startsWith(prefix)) {
+    return undefined;
+  }
+
+  const parsedItems = normalizeReviewItemsPayload(payload.slice(prefix.length));
+  if (!parsedItems) {
+    return undefined;
+  }
+
+  const base = buildMiniAppUrlForUser(from) || config.miniAppUrl;
+  if (!base) {
+    return undefined;
+  }
+
+  const url = new URL(base);
+  url.searchParams.set("r", "site/orderReview");
+  url.searchParams.set("items", parsedItems);
+  url.searchParams.set("ch", "telegram");
+  if (from?.id) {
+    url.searchParams.set("uid", String(from.id));
+  }
+  return url.toString();
+}
+
+function normalizeReviewItemsPayload(rawItems: string): string | undefined {
+  const parts = String(rawItems || "")
+    .split(",")
+    .map((part) => part.trim().toUpperCase())
+    .filter(Boolean);
+  if (!parts.length) {
+    return undefined;
+  }
+
+  const normalized: string[] = [];
+  for (const part of parts) {
+    const matched = part.match(/^([A-Z0-9_-]{2,40}):([1-9][0-9]{0,2})$/);
+    if (!matched) {
+      continue;
+    }
+    normalized.push(`${matched[1]}:${matched[2]}`);
+    if (normalized.length >= 20) {
+      break;
+    }
+  }
+
+  if (!normalized.length) {
+    return undefined;
+  }
+  return normalized.join(",");
+}
+
+function buildTelegramSessionToken(from: { id: number; first_name?: string; last_name?: string; username?: string }): string | undefined {
+  if (!config.webSessionSecret) {
+    return undefined;
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const payload = {
+    src: "telegram",
+    uid: String(from.id),
+    name: [from.first_name, from.last_name].filter(Boolean).join(" ").trim(),
+    username: from.username || "",
+    iat: nowSec,
+    exp: nowSec + config.webSessionTtlSec,
+  };
+
+  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", config.webSessionSecret).update(encodedPayload).digest("base64url");
+  return `${encodedPayload}.${signature}`;
+}
+
 function chunkArray<T>(items: T[], size: number): T[][] {
   const output: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -895,4 +1175,3 @@ function maskTransferRef(value: string): string {
   }
   return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
 }
-

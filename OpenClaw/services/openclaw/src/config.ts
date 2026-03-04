@@ -18,6 +18,15 @@ const envSchema = z.object({
   BANK_NAME: z.string().default("Vietcombank"),
   BANK_ACCOUNT_NAME: z.string().default("CONG TY OPENCLAW DEMO"),
   BANK_ACCOUNT_NUMBER: z.string().default("0000000000"),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  MESSENGER_PAGE_ACCESS_TOKEN: z.string().optional(),
+  OPENCLAW_DB_HOST: z.string().default("lowland_db"),
+  OPENCLAW_DB_PORT: z.coerce.number().default(3306),
+  OPENCLAW_DB_NAME: z.string().default("lowland_coffee"),
+  OPENCLAW_DB_USER: z.string().default("web251"),
+  OPENCLAW_DB_PASS: z.string().default("Webhk251!"),
+  DIALOG_ENGINE_V2_ENABLED: z.string().optional(),
+  DIALOG_SESSION_TTL_HOURS: z.coerce.number().default(24),
 });
 
 export type OpenClawConfig = {
@@ -35,6 +44,15 @@ export type OpenClawConfig = {
   bankName: string;
   bankAccountName: string;
   bankAccountNumber: string;
+  telegramToken?: string;
+  messengerToken?: string;
+  openclawDbHost: string;
+  openclawDbPort: number;
+  openclawDbName: string;
+  openclawDbUser: string;
+  openclawDbPass: string;
+  dialogEngineV2Enabled: boolean;
+  dialogSessionTtlHours: number;
 };
 
 export function readConfig(): OpenClawConfig {
@@ -54,5 +72,22 @@ export function readConfig(): OpenClawConfig {
     bankName: env.BANK_NAME,
     bankAccountName: env.BANK_ACCOUNT_NAME,
     bankAccountNumber: env.BANK_ACCOUNT_NUMBER,
+    telegramToken: env.TELEGRAM_BOT_TOKEN,
+    messengerToken: env.MESSENGER_PAGE_ACCESS_TOKEN,
+    openclawDbHost: env.OPENCLAW_DB_HOST,
+    openclawDbPort: env.OPENCLAW_DB_PORT,
+    openclawDbName: env.OPENCLAW_DB_NAME,
+    openclawDbUser: env.OPENCLAW_DB_USER,
+    openclawDbPass: env.OPENCLAW_DB_PASS,
+    dialogEngineV2Enabled: parseBoolean(env.DIALOG_ENGINE_V2_ENABLED),
+    dialogSessionTtlHours: Math.max(1, env.DIALOG_SESSION_TTL_HOURS),
   };
+}
+
+function parseBoolean(input?: string): boolean {
+  if (!input) {
+    return false;
+  }
+  const normalized = input.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }

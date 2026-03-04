@@ -18,6 +18,13 @@ describe("buildBackend", () => {
     bankName: "Vietcombank",
     bankAccountName: "A",
     bankAccountNumber: "1",
+    openclawDbHost: "lowland_db",
+    openclawDbPort: 3306,
+    openclawDbName: "lowland_coffee",
+    openclawDbUser: "web251",
+    openclawDbPass: "Webhk251!",
+    dialogEngineV2Enabled: false,
+    dialogSessionTtlHours: 24,
   };
 
   it("routes telegram channel to sales-mcp tools", async () => {
@@ -45,5 +52,17 @@ describe("buildBackend", () => {
       { "x-correlation-id": "cid2", "x-api-key": "bridge-key" },
     );
   });
-});
 
+  it("routes messenger channel to bot bridge endpoints", async () => {
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: null });
+    const backend = buildBackend("messenger", config, { postJson } as any);
+
+    await backend.postTool("faq_answer", { question: "q" }, "cid3");
+
+    expect(postJson).toHaveBeenCalledWith(
+      "http://lowland-app/?r=botBridge/faqAnswer",
+      { question: "q" },
+      { "x-correlation-id": "cid3", "x-api-key": "bridge-key" },
+    );
+  });
+});
