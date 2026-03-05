@@ -58,6 +58,7 @@ define('MESSENGER_VERIFY_TOKEN', getenv('MESSENGER_VERIFY_TOKEN') ?: 'change-me-
 define('MESSENGER_APP_SECRET', getenv('MESSENGER_APP_SECRET') ?: '');
 define('MESSENGER_PAGE_ACCESS_TOKEN', getenv('MESSENGER_PAGE_ACCESS_TOKEN') ?: '');
 define('MESSENGER_GRAPH_VERSION', getenv('MESSENGER_GRAPH_VERSION') ?: 'v21.0');
+define('MESSENGER_AUTO_PROFILE_SETUP', filter_var(getenv('MESSENGER_AUTO_PROFILE_SETUP') ?: '1', FILTER_VALIDATE_BOOLEAN));
 define('EXTERNAL_SESSION_SECRET', getenv('EXTERNAL_SESSION_SECRET') ?: '');
 
 date_default_timezone_set('Asia/Ho_Chi_Minh');

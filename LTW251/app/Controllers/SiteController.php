@@ -32,6 +32,7 @@ class SiteController extends BaseController {
     $channelHint = strtolower(trim((string)($_REQUEST['ch'] ?? '')));
     $uidHint = trim((string)($_REQUEST['uid'] ?? ''));
     $extToken = trim((string)($_REQUEST['ext'] ?? ''));
+    $recipientHints = $this->parseOrderReviewRecipientHints($_REQUEST);
     $identity = $this->resolveOrderReviewIdentity($channelHint, $uidHint, $extToken);
 
     if (!is_array($identity)) {
@@ -123,6 +124,7 @@ class SiteController extends BaseController {
     }
 
     $recipient = $this->recipientFromDialogueSnapshot($snapshot);
+    $recipient = $this->mergeRecipientWithHints($recipient, $recipientHints);
     $editForm = [
       'name' => (string)$recipient['name'],
       'phone' => (string)$recipient['phone'],
@@ -142,7 +144,7 @@ class SiteController extends BaseController {
       $editResult = $this->updateRecipientFromReview($identity, $editForm);
       if (!empty($editResult['ok']) && is_array($identity)) {
         $snapshot = $this->loadDialogueSnapshot((string)$identity['channel'], (string)$identity['userId']);
-        $recipient = $this->recipientFromDialogueSnapshot($snapshot);
+        $recipient = $this->mergeRecipientWithHints($this->recipientFromDialogueSnapshot($snapshot), $recipientHints);
         $editForm = [
           'name' => (string)$recipient['name'],
           'phone' => (string)$recipient['phone'],
@@ -154,12 +156,12 @@ class SiteController extends BaseController {
       $confirmResult = $this->confirmOrderFromReview($identity, $recipient);
       if (!empty($confirmResult['ok']) && is_array($identity)) {
         $snapshot = $this->loadDialogueSnapshot((string)$identity['channel'], (string)$identity['userId']);
-        $recipient = $this->recipientFromDialogueSnapshot($snapshot);
+        $recipient = $this->mergeRecipientWithHints($this->recipientFromDialogueSnapshot($snapshot), $recipientHints);
       }
     }
 
     $hasInput = $itemsRaw !== '';
-    $canConfirm = !empty($reviewItems) && empty($recipient['missingFields']);
+    $canConfirm = !empty($reviewItems) && empty($recipient['missingFields']) && is_array($identity);
     $identityView = is_array($identity)
       ? [
           'channel' => (string)$identity['channel'],
@@ -720,6 +722,61 @@ class SiteController extends BaseController {
     return $data;
   }
 
+  private function parseOrderReviewRecipientHints($source) {
+    if (!is_array($source)) {
+      return ['name' => '', 'phone' => '', 'address' => '', 'paymentMethod' => ''];
+    }
+
+    $name = trim((string)($source['rn'] ?? ''));
+    $phone = preg_replace('/\D+/', '', (string)($source['rp'] ?? ''));
+    $address = trim((string)($source['ra'] ?? ''));
+    $payment = strtolower(trim((string)($source['rm'] ?? '')));
+
+    return [
+      'name' => mb_substr($name, 0, 120),
+      'phone' => substr((string)$phone, 0, 15),
+      'address' => mb_substr($address, 0, 400),
+      'paymentMethod' => in_array($payment, ['bank_transfer', 'cod'], true) ? $payment : '',
+    ];
+  }
+
+  private function mergeRecipientWithHints($recipient, $hints) {
+    $base = is_array($recipient) ? $recipient : [];
+    $hintData = is_array($hints) ? $hints : [];
+
+    $name = trim((string)($base['name'] ?? ''));
+    $phone = trim((string)($base['phone'] ?? ''));
+    $address = trim((string)($base['address'] ?? ''));
+    $payment = trim((string)($base['paymentMethod'] ?? ''));
+
+    if ($name === '' && !empty($hintData['name'])) {
+      $name = trim((string)$hintData['name']);
+    }
+    if ($phone === '' && !empty($hintData['phone'])) {
+      $phone = trim((string)$hintData['phone']);
+    }
+    if ($address === '' && !empty($hintData['address'])) {
+      $address = trim((string)$hintData['address']);
+    }
+    if ($payment === '' && !empty($hintData['paymentMethod'])) {
+      $payment = trim((string)$hintData['paymentMethod']);
+    }
+
+    $missing = [];
+    if ($name === '') $missing[] = 'name';
+    if ($phone === '') $missing[] = 'phone';
+    if ($address === '') $missing[] = 'address';
+    if ($payment === '') $missing[] = 'paymentMethod';
+
+    $base['name'] = $name;
+    $base['phone'] = $phone;
+    $base['address'] = $address;
+    $base['paymentMethod'] = $payment;
+    $base['missingFields'] = $missing;
+
+    return $base;
+  }
+
   private function updateRecipientFromReview($identity, $fields) {
     if (!is_array($identity)) {
       return ['ok' => false, 'message' => 'Không xác định được phiên bot để lưu thông tin. Hãy mở lại link review từ nút trong bot mới nhất.'];
@@ -835,6 +892,57 @@ class SiteController extends BaseController {
     return in_array((string)$fieldName, $missing, true);
   }
 
+  private function syncRecipientToDialogue($identity, $recipient) {
+    if (!is_array($identity) || !is_array($recipient)) {
+      return ['ok' => false, 'message' => 'Thiếu dữ liệu phiên bot để đồng bộ.'];
+    }
+
+    $errors = [];
+    $name = trim((string)($recipient['name'] ?? ''));
+    $phone = trim((string)($recipient['phone'] ?? ''));
+    $address = trim((string)($recipient['address'] ?? ''));
+    $payment = trim((string)($recipient['paymentMethod'] ?? ''));
+
+    if ($name !== '') {
+      $result = $this->pushActionToOpenClaw($identity, 'ACTION_ORDER_SET_NAME:' . $name, 'Đồng bộ tên người nhận trước khi xác nhận');
+      if ($this->actionStillMissing($result, 'name')) {
+        $errors[] = $result['reply'] !== '' ? $result['reply'] : 'Tên người nhận chưa hợp lệ.';
+      }
+    }
+
+    if ($phone !== '') {
+      $result = $this->pushActionToOpenClaw($identity, 'ACTION_ORDER_SET_PHONE:' . $phone, 'Đồng bộ số điện thoại trước khi xác nhận');
+      if ($this->actionStillMissing($result, 'phone')) {
+        $errors[] = $result['reply'] !== '' ? $result['reply'] : 'Số điện thoại chưa hợp lệ.';
+      }
+    }
+
+    if ($address !== '') {
+      $result = $this->pushActionToOpenClaw($identity, 'ACTION_ORDER_SET_ADDRESS:' . $address, 'Đồng bộ địa chỉ trước khi xác nhận');
+      if ($this->actionStillMissing($result, 'address')) {
+        $errors[] = $result['reply'] !== '' ? $result['reply'] : 'Địa chỉ giao hàng chưa hợp lệ.';
+      }
+    }
+
+    if ($payment !== '') {
+      $paymentNormalized = strtolower($payment);
+      if (!in_array($paymentNormalized, ['bank_transfer', 'cod'], true)) {
+        $errors[] = 'Phương thức thanh toán chưa hợp lệ.';
+      } else {
+        $result = $this->pushActionToOpenClaw($identity, 'ACTION_ORDER_SET_PAYMENT:' . $paymentNormalized, 'Đồng bộ phương thức thanh toán trước khi xác nhận');
+        if ($this->actionStillMissing($result, 'paymentMethod')) {
+          $errors[] = $result['reply'] !== '' ? $result['reply'] : 'Phương thức thanh toán chưa hợp lệ.';
+        }
+      }
+    }
+
+    if (!empty($errors)) {
+      return ['ok' => false, 'message' => implode(' ', $errors)];
+    }
+
+    return ['ok' => true];
+  }
+
   private function confirmOrderFromReview($identity, $recipient) {
     if (!is_array($identity)) {
       return ['ok' => false, 'message' => 'Không xác định được phiên bot để đồng bộ xác nhận đơn.'];
@@ -842,6 +950,11 @@ class SiteController extends BaseController {
 
     if (is_array($recipient) && !empty($recipient['missingFields'])) {
       return ['ok' => false, 'message' => 'Phiên bot còn thiếu thông tin nhận hàng, chưa thể xác nhận đơn ngay trên web.'];
+    }
+
+    $syncResult = $this->syncRecipientToDialogue($identity, is_array($recipient) ? $recipient : []);
+    if (empty($syncResult['ok'])) {
+      return ['ok' => false, 'message' => trim((string)($syncResult['message'] ?? 'Đồng bộ thông tin nhận hàng thất bại.'))];
     }
 
     $request = [

@@ -6,12 +6,7 @@ class DB {
   public static function pdo() {
     if (self::$pdo === null) {
       require_once __DIR__ . '/../../config/config.php';
-      $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4';
-      self::$pdo = new PDO($dsn, DB_USER, DB_PASS, [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
-      ]);
+      self::$pdo = self::connectPdo();
 
       self::ensureBotSchema();
 
@@ -22,6 +17,51 @@ class DB {
       self::$initialized = true;
     }
     return self::$pdo;
+  }
+
+  private static function connectPdo() {
+    $dbCandidates = [trim((string)DB_NAME)];
+    foreach (['lowland_coffee', 'lowland_db'] as $fallbackDb) {
+      if (!in_array($fallbackDb, $dbCandidates, true)) {
+        $dbCandidates[] = $fallbackDb;
+      }
+    }
+
+    $options = [
+      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+      PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
+    ];
+
+    $lastException = null;
+    foreach ($dbCandidates as $dbName) {
+      if ($dbName === '') {
+        continue;
+      }
+      try {
+        $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . $dbName . ';charset=utf8mb4';
+        return new PDO($dsn, DB_USER, DB_PASS, $options);
+      } catch (PDOException $e) {
+        $lastException = $e;
+        if (!self::isUnknownDatabaseError($e)) {
+          throw $e;
+        }
+      }
+    }
+
+    if ($lastException instanceof PDOException) {
+      throw $lastException;
+    }
+    throw new PDOException('Unable to connect database');
+  }
+
+  private static function isUnknownDatabaseError($exception) {
+    if (!$exception instanceof PDOException) {
+      return false;
+    }
+    $code = (string)$exception->getCode();
+    $msg = strtolower((string)$exception->getMessage());
+    return $code === '1049' || strpos($msg, 'unknown database') !== false;
   }
 
   private static function ensurePagesTable() {
@@ -124,6 +164,8 @@ class DB {
         role ENUM('user','bot','agent','system') NOT NULL,
         input_text TEXT NULL,
         action_payload VARCHAR(255) NULL,
+        source_message_id VARCHAR(128) NULL,
+        locale VARCHAR(32) NULL,
         intent VARCHAR(64) NULL,
         state_before VARCHAR(64) NULL,
         state_after VARCHAR(64) NULL,
@@ -135,6 +177,13 @@ class DB {
         INDEX idx_chat_events_intent_time (intent, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
+
+    if (!self::columnExists('chat_dialogue_events', 'source_message_id')) {
+      self::$pdo->exec("ALTER TABLE chat_dialogue_events ADD COLUMN source_message_id VARCHAR(128) NULL AFTER action_payload");
+    }
+    if (!self::columnExists('chat_dialogue_events', 'locale')) {
+      self::$pdo->exec("ALTER TABLE chat_dialogue_events ADD COLUMN locale VARCHAR(32) NULL AFTER source_message_id");
+    }
   }
 
   private static function tableExists($table) {

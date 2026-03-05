@@ -167,6 +167,8 @@ export class DialogueStateStoreMySql {
         role ENUM('user','bot','agent','system') NOT NULL,
         input_text TEXT NULL,
         action_payload VARCHAR(255) NULL,
+        source_message_id VARCHAR(128) NULL,
+        locale VARCHAR(32) NULL,
         intent VARCHAR(64) NULL,
         state_before VARCHAR(64) NULL,
         state_after VARCHAR(64) NULL,
@@ -179,6 +181,9 @@ export class DialogueStateStoreMySql {
         INDEX idx_chat_events_intent_time (intent, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    await this.ensureEventColumn("source_message_id", "VARCHAR(128) NULL");
+    await this.ensureEventColumn("locale", "VARCHAR(32) NULL");
   }
 
   private buildDefaultSession(channel: BackendChannel, userId: string): DialogueSession {
@@ -190,6 +195,24 @@ export class DialogueStateStoreMySql {
       version: 1,
       expiresAt: new Date(Date.now() + this.config.dialogSessionTtlHours * 60 * 60 * 1000),
     };
+  }
+
+  private async ensureEventColumn(columnName: string, columnDdl: string): Promise<void> {
+    const [rows] = await this.pool.query<any[]>(
+      `SELECT 1 AS present
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'chat_dialogue_events'
+         AND COLUMN_NAME = ?
+       LIMIT 1`,
+      [columnName],
+    );
+
+    if (Array.isArray(rows) && rows.length > 0) {
+      return;
+    }
+
+    await this.pool.query(`ALTER TABLE chat_dialogue_events ADD COLUMN ${columnName} ${columnDdl}`);
   }
 }
 

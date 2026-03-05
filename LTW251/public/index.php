@@ -36,8 +36,29 @@ if (!method_exists($ctl, $a)) {
     http_response_code(404); echo "404 Action not found"; exit; 
 }
 
-echo $ctl->$a();
+function rewrite_legacy_route_links(string $html): string {
+  $baseUrl = defined('BASE_URL') ? rtrim((string)BASE_URL, '/') : '';
+  if ($baseUrl === '') {
+    return $html;
+  }
+  $basePath = (string)parse_url($baseUrl, PHP_URL_PATH);
+  if ($basePath === '' || $basePath === '/') {
+    return $html;
+  }
+
+  return str_replace(
+    ['"/?r=', "'/?r="],
+    ['"' . $baseUrl . '/?r=', "'" . $baseUrl . '/?r='],
+    $html
+  );
+}
+
+$ctl->$a();
 
 // 4. Kết thúc buffer
-ob_end_flush();
+$buffer = ob_get_clean();
+if (!is_string($buffer)) {
+    $buffer = '';
+}
+echo rewrite_legacy_route_links($buffer);
 ?>

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
+import type { Pool } from "mysql2/promise";
 import pinoHttp from "pino-http";
 import { z } from "zod";
 import { buildBackend, type BackendChannel } from "./backends";
@@ -90,6 +91,24 @@ const chatSchema = z.object({
   }
 });
 
+const kpiSchema = z.object({
+  windowMinutes: z.coerce.number().int().min(5).max(7 * 24 * 60).default(60),
+});
+
+const KPI_ACTION_ERROR_INTENTS = [
+  "wizard_invalid_input",
+  "invalid_phone",
+  "invalid_address",
+  "order_next_missing_items",
+  "order_next_missing_name",
+  "order_next_missing_phone",
+  "order_next_missing_address",
+  "order_next_missing_payment",
+  "order_confirm_missing",
+  "order_create_failed",
+  "order_status_missing_code",
+] as const;
+
 export function createApp(config: OpenClawConfig) {
   const app = express();
   const toolHttpClient = new HttpClient(config.timeoutMs);
@@ -113,6 +132,23 @@ export function createApp(config: OpenClawConfig) {
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", service: "openclaw" });
+  });
+
+  app.get("/admin/kpi/summary", async (req, res) => {
+    if (!dialogueStateStore) {
+      res.status(503).json({ ok: false, error: "Dialogue engine v2 is disabled" });
+      return;
+    }
+
+    try {
+      const query = kpiSchema.parse(req.query);
+      const summary = await buildKpiSummary(dialogueStateStore.getPool(), query.windowMinutes);
+      res.json({ ok: true, data: summary });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      req.log.error({ error: message }, "openclaw kpi summary failed");
+      res.status(500).json({ ok: false, error: message });
+    }
   });
 
   app.post("/chat", async (req, res) => {
@@ -259,6 +295,8 @@ async function handleWithDialogueEngine(
     role: "user",
     inputText: payload.message,
     actionPayload: payload.actionPayload,
+    sourceMessageId: payload.clientContext?.sourceMessageId,
+    locale: payload.clientContext?.locale,
     stateBefore: session.state,
   };
   await eventLogger.log(userEvent);
@@ -285,6 +323,8 @@ async function handleWithDialogueEngine(
     role: "bot",
     inputText: result.reply,
     actionPayload: payload.actionPayload,
+    sourceMessageId: payload.clientContext?.sourceMessageId,
+    locale: payload.clientContext?.locale,
     intent: result.intent,
     stateBefore: session.state,
     stateAfter: result.nextState,
@@ -1057,4 +1097,151 @@ function buildHandoffWaitingReply(channel: ChatChannel): ChatResult {
       suggestions: ["Tiếp tục với bot", "Xem menu"],
     },
   };
+}
+
+type KpiCounters = {
+  totalBotEvents: number;
+  fallbackCount: number;
+  orderStartCount: number;
+  orderCreateSuccessCount: number;
+  actionTotalCount: number;
+  actionErrorCount: number;
+};
+
+type KpiSummaryRow = {
+  channel: ChatChannel;
+  counters: KpiCounters;
+  rates: {
+    fallbackRate: number;
+    orderWizardCompletionRate: number;
+    actionErrorRate: number;
+  };
+};
+
+type KpiSummaryPayload = {
+  windowMinutes: number;
+  windowStartedAt: string;
+  generatedAt: string;
+  channels: KpiSummaryRow[];
+  overall: {
+    counters: KpiCounters;
+    rates: {
+      fallbackRate: number;
+      orderWizardCompletionRate: number;
+      actionErrorRate: number;
+    };
+  };
+};
+
+async function buildKpiSummary(pool: Pool, windowMinutes: number): Promise<KpiSummaryPayload> {
+  const placeholders = KPI_ACTION_ERROR_INTENTS.map(() => "?").join(", ");
+  const [rows] = await pool.query<any[]>(
+    `SELECT
+       channel,
+       COUNT(*) AS total_bot_events,
+       SUM(CASE WHEN intent = 'fallback' THEN 1 ELSE 0 END) AS fallback_count,
+       SUM(CASE WHEN intent = 'order_start' THEN 1 ELSE 0 END) AS order_start_count,
+       SUM(CASE WHEN intent = 'order_create_success' THEN 1 ELSE 0 END) AS order_create_success_count,
+       SUM(CASE WHEN action_payload IS NOT NULL AND action_payload <> '' THEN 1 ELSE 0 END) AS action_total_count,
+       SUM(
+         CASE
+           WHEN action_payload IS NOT NULL
+             AND action_payload <> ''
+             AND intent IN (${placeholders})
+           THEN 1 ELSE 0
+         END
+       ) AS action_error_count
+     FROM chat_dialogue_events
+     WHERE role = 'bot'
+       AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
+     GROUP BY channel`,
+    [...KPI_ACTION_ERROR_INTENTS, windowMinutes],
+  );
+
+  const mapped = new Map<ChatChannel, KpiCounters>();
+  for (const row of rows || []) {
+    const channel = String(row.channel || "");
+    if (!isChatChannel(channel)) {
+      continue;
+    }
+    mapped.set(channel, {
+      totalBotEvents: toInt(row.total_bot_events),
+      fallbackCount: toInt(row.fallback_count),
+      orderStartCount: toInt(row.order_start_count),
+      orderCreateSuccessCount: toInt(row.order_create_success_count),
+      actionTotalCount: toInt(row.action_total_count),
+      actionErrorCount: toInt(row.action_error_count),
+    });
+  }
+
+  const channels: ChatChannel[] = ["web", "messenger", "telegram"];
+  const channelRows = channels.map((channel) => toKpiRow(channel, mapped.get(channel) || emptyKpiCounters()));
+  const overallCounters = channelRows.reduce<KpiCounters>(
+    (acc, row) => ({
+      totalBotEvents: acc.totalBotEvents + row.counters.totalBotEvents,
+      fallbackCount: acc.fallbackCount + row.counters.fallbackCount,
+      orderStartCount: acc.orderStartCount + row.counters.orderStartCount,
+      orderCreateSuccessCount: acc.orderCreateSuccessCount + row.counters.orderCreateSuccessCount,
+      actionTotalCount: acc.actionTotalCount + row.counters.actionTotalCount,
+      actionErrorCount: acc.actionErrorCount + row.counters.actionErrorCount,
+    }),
+    emptyKpiCounters(),
+  );
+
+  return {
+    windowMinutes,
+    windowStartedAt: new Date(Date.now() - windowMinutes * 60_000).toISOString(),
+    generatedAt: new Date().toISOString(),
+    channels: channelRows,
+    overall: {
+      counters: overallCounters,
+      rates: {
+        fallbackRate: toRatePercent(overallCounters.fallbackCount, overallCounters.totalBotEvents),
+        orderWizardCompletionRate: toRatePercent(overallCounters.orderCreateSuccessCount, overallCounters.orderStartCount),
+        actionErrorRate: toRatePercent(overallCounters.actionErrorCount, overallCounters.actionTotalCount),
+      },
+    },
+  };
+}
+
+function toKpiRow(channel: ChatChannel, counters: KpiCounters): KpiSummaryRow {
+  return {
+    channel,
+    counters,
+    rates: {
+      fallbackRate: toRatePercent(counters.fallbackCount, counters.totalBotEvents),
+      orderWizardCompletionRate: toRatePercent(counters.orderCreateSuccessCount, counters.orderStartCount),
+      actionErrorRate: toRatePercent(counters.actionErrorCount, counters.actionTotalCount),
+    },
+  };
+}
+
+function emptyKpiCounters(): KpiCounters {
+  return {
+    totalBotEvents: 0,
+    fallbackCount: 0,
+    orderStartCount: 0,
+    orderCreateSuccessCount: 0,
+    actionTotalCount: 0,
+    actionErrorCount: 0,
+  };
+}
+
+function toRatePercent(numerator: number, denominator: number): number {
+  if (!denominator) {
+    return 0;
+  }
+  return Number(((numerator / denominator) * 100).toFixed(2));
+}
+
+function toInt(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return Math.trunc(parsed);
+}
+
+function isChatChannel(value: string): value is ChatChannel {
+  return value === "web" || value === "messenger" || value === "telegram";
 }

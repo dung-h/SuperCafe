@@ -143,16 +143,82 @@
   }
 
   function buildOrderReviewUrl(payload) {
-    var prefix = 'OPEN_WEB_REVIEW:';
-    var raw = String(payload || '');
-    if (raw.indexOf(prefix) !== 0) return '';
-    var items = normalizeReviewItemsPayload(raw.slice(prefix.length));
-    if (!items) return '';
-    var url = baseUrl + '/?r=site/orderReview&items=' + encodeURIComponent(items) + '&ch=web';
+    var parsed = parseReviewPayload(payload);
+    if (!parsed || !parsed.items) return '';
+    var url = baseUrl + '/?r=site/orderReview&items=' + encodeURIComponent(parsed.items) + '&ch=web';
     if (externalSessionToken) {
       url += '&ext=' + encodeURIComponent(externalSessionToken);
     }
+    if (parsed.name) {
+      url += '&rn=' + encodeURIComponent(parsed.name);
+    }
+    if (parsed.phone) {
+      url += '&rp=' + encodeURIComponent(parsed.phone);
+    }
+    if (parsed.address) {
+      url += '&ra=' + encodeURIComponent(parsed.address);
+    }
+    if (parsed.payment) {
+      url += '&rm=' + encodeURIComponent(parsed.payment);
+    }
     return url;
+  }
+
+  function parseReviewPayload(payload) {
+    var prefix = 'OPEN_WEB_REVIEW:';
+    var raw = String(payload || '').trim();
+    if (raw.indexOf(prefix) !== 0) return null;
+    var body = raw.slice(prefix.length).trim();
+    if (!body || body.length > 1200) return null;
+
+    var chunks = body.split('|').map(function (part) { return String(part || '').trim(); }).filter(Boolean);
+    if (!chunks.length) return null;
+
+    var items = normalizeReviewItemsPayload(chunks.shift() || '');
+    if (!items) return null;
+
+    var parsed = { items: items, name: '', phone: '', address: '', payment: '' };
+    chunks.forEach(function (chunk) {
+      var idx = chunk.indexOf('=');
+      if (idx <= 0) return;
+      var key = chunk.slice(0, idx).trim().toLowerCase();
+      var value = chunk.slice(idx + 1).trim();
+      if (!value) return;
+
+      if (key === 'n') {
+        parsed.name = decodeReviewField(value);
+        return;
+      }
+      if (key === 'a') {
+        parsed.address = decodeReviewField(value);
+        return;
+      }
+      if (key === 'p') {
+        parsed.phone = String(value).replace(/\D+/g, '').slice(0, 15);
+        return;
+      }
+      if (key === 'm') {
+        var payment = String(value).toLowerCase();
+        if (payment === 'bank_transfer' || payment === 'cod') {
+          parsed.payment = payment;
+        }
+      }
+    });
+
+    return parsed;
+  }
+
+  function decodeReviewField(encoded) {
+    var raw = String(encoded || '').trim();
+    if (!raw || !/^[A-Za-z0-9\-_]+$/.test(raw)) return '';
+    try {
+      var b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4 !== 0) b64 += '=';
+      var utf8 = decodeURIComponent(escape(window.atob(b64)));
+      return String(utf8 || '').trim();
+    } catch (e) {
+      return '';
+    }
   }
 
   function setQuickChips(suggestionsRaw) {

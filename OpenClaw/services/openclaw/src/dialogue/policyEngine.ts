@@ -22,6 +22,7 @@ import {
 } from "./stateMachine";
 import {
   defaultSessionContext,
+  type DialogueOrderContext,
   type DialogueSession,
   type DialogueSessionContext,
   type DialogueStateName,
@@ -57,11 +58,40 @@ export class DialoguePolicyEngine {
   ) {}
 
   async run(input: PolicyInput, session: DialogueSession): Promise<PolicyExecution> {
-    const action = parseActionPayload(input.actionPayload) ?? inferActionFromText(input.message);
+    let action = parseActionPayload(input.actionPayload) ?? inferActionFromText(input.message);
     const stateBefore = session.state;
     const context = sanitizeContext(session.context, input.profile);
     let state = stateBefore;
     const toolCalls: string[] = [];
+    const freeText = input.message.trim();
+
+    if (!action && context.pendingOrderSuggestion && freeText) {
+      if (isAffirmativeText(freeText)) {
+        upsertOrderItem(context, context.pendingOrderSuggestion.sku, context.pendingOrderSuggestion.qty);
+        const accepted = { ...context.pendingOrderSuggestion };
+        delete context.pendingOrderSuggestion;
+        const lines = context.order.items.map((item) => `- ${item.sku} x${item.qty}`);
+        return buildExecution(
+          "ORDER_COLLECT_ITEMS",
+          context,
+          `Đã thêm ${accepted.qty} x ${accepted.name} vào giỏ.\n${lines.join("\n")}\nBấm 'Tiếp tục' để sang bước nhập thông tin nhận hàng.`,
+          menuUi("Bước 1/6: Chọn món", [], [...categorySuggestions(), ...orderStepSuggestions()]),
+          toolCalls,
+          "order_natural_confirm_yes_text",
+        );
+      }
+      if (isNegativeText(freeText)) {
+        delete context.pendingOrderSuggestion;
+        return buildExecution(
+          "ORDER_COLLECT_ITEMS",
+          context,
+          "Ok, mình không thêm món đó. Bạn chọn món khác hoặc bấm 'Xem menu' nhé.",
+          menuUi("Bước 1/6: Chọn món", [], [...categorySuggestions(), ...orderStepSuggestions()]),
+          toolCalls,
+          "order_natural_confirm_no_text",
+        );
+      }
+    }
 
     if (state === "HANDOFF_WAITING" && action?.type !== "ACTION_HANDOFF_RESUME") {
       return buildExecution(
@@ -240,6 +270,23 @@ export class DialoguePolicyEngine {
         state = "ORDER_COLLECT_ITEMS";
       }
 
+      if (!action) {
+        if (state === "ORDER_CONFIRM" && freeText) {
+          if (isAffirmativeText(freeText)) {
+            action = { type: "ACTION_ORDER_CONFIRM", raw: freeText };
+          } else if (isNegativeText(freeText)) {
+            return buildExecution(
+              state,
+              context,
+              "Mình chưa xác nhận đơn. Bạn có thể bấm 'Quay lại' để chỉnh thông tin, hoặc 'Hủy đơn' nếu muốn dừng.",
+              menuForState(state, context),
+              toolCalls,
+              "order_confirm_declined_text",
+            );
+          }
+        }
+      }
+
       const handled = applyWizardFieldFromAction(state, context, action);
       if (handled.error) {
         return buildExecution(state, context, handled.error, menuForState(state, context), toolCalls, "wizard_invalid_input");
@@ -264,35 +311,6 @@ export class DialoguePolicyEngine {
       }
 
       if (state === "ORDER_COLLECT_ITEMS" && !action) {
-        const freeText = input.message.trim();
-        if (context.pendingOrderSuggestion && freeText) {
-          if (isAffirmativeText(freeText)) {
-            upsertOrderItem(context, context.pendingOrderSuggestion.sku, context.pendingOrderSuggestion.qty);
-            const accepted = { ...context.pendingOrderSuggestion };
-            delete context.pendingOrderSuggestion;
-            const lines = context.order.items.map((item) => `- ${item.sku} x${item.qty}`);
-            return buildExecution(
-              state,
-              context,
-              `Đã thêm ${accepted.qty} x ${accepted.name} vào giỏ.\n${lines.join("\n")}\nBấm 'Tiếp tục' để sang bước nhập thông tin nhận hàng.`,
-              menuUi("Bước 1/6: Chọn món", [], [...categorySuggestions(), ...orderStepSuggestions()]),
-              toolCalls,
-              "order_natural_confirm_yes_text",
-            );
-          }
-          if (isNegativeText(freeText)) {
-            delete context.pendingOrderSuggestion;
-            return buildExecution(
-              state,
-              context,
-              "Ok, mình không thêm món đó. Bạn chọn món khác hoặc bấm 'Xem menu' nhé.",
-              menuUi("Bước 1/6: Chọn món", [], [...categorySuggestions(), ...orderStepSuggestions()]),
-              toolCalls,
-              "order_natural_confirm_no_text",
-            );
-          }
-        }
-
         const parsedItems = parseItemListFromText(input.message);
         if (parsedItems.length) {
           delete context.pendingOrderSuggestion;
@@ -316,12 +334,22 @@ export class DialoguePolicyEngine {
       }
 
       if (!action) {
-        const freeText = input.message.trim();
         if (state === "ORDER_COLLECT_NAME" && freeText) {
           context.order.name = freeText;
           state = "ORDER_COLLECT_PHONE";
         } else if (state === "ORDER_COLLECT_PHONE" && freeText) {
           if (!isValidPhone(freeText)) {
+            if (looksLikeHumanName(freeText)) {
+              context.order.name = freeText;
+              return buildExecution(
+                state,
+                context,
+                "Mình đã cập nhật tên người nhận. Bạn nhập số điện thoại giúp mình nhé.",
+                menuForState(state, context),
+                toolCalls,
+                "phone_step_received_name",
+              );
+            }
             return buildExecution(state, context, "Số điện thoại chưa hợp lệ, bạn nhập lại giúp mình nhé.", menuForState(state, context), toolCalls, "invalid_phone");
           }
           context.order.phone = digitsOnly(freeText);
@@ -578,7 +606,7 @@ function applyWizardFieldFromAction(
   }
 
   if (action.type === "ACTION_ORDER_SET_ADDRESS") {
-    if (!action.text) {
+    if (!action.text || !isValidAddressInput(action.text)) {
       return { error: "Bạn nhập địa chỉ nhận hàng giúp mình." };
     }
     context.order.address = action.text;
@@ -644,7 +672,7 @@ function advanceToNextRequiredState(state: DialogueStateName, context: DialogueS
 
 function promptForState(state: DialogueStateName): string {
   if (state === "ORDER_COLLECT_ITEMS") {
-    return "Bạn chọn món bằng ACTION_ORDER_ADD hoặc gửi SKU:SL (ví dụ CAFE-SUA:2).";
+    return "Bạn chọn món bằng nút gợi ý hoặc gửi theo mẫu SKU:SL (ví dụ CAFE-SUA:2).";
   }
   if (state === "ORDER_COLLECT_NAME") {
     return "Bạn cho mình tên người nhận đơn.";
@@ -722,11 +750,55 @@ function isGoogleMapsLink(text: string): boolean {
 }
 
 function confirmExtraSuggestions(context: DialogueSessionContext): UiSuggestion[] {
-  const payload = serializeOrderItems(context.order.items);
+  const payload = serializeOrderReviewPayload(context.order);
   if (!payload) {
     return [];
   }
   return [suggestion("Xem ảnh món trên web", `OPEN_WEB_REVIEW:${payload}`)];
+}
+
+function serializeOrderReviewPayload(order: DialogueOrderContext): string {
+  const itemsPayload = serializeOrderItems(order.items);
+  if (!itemsPayload) {
+    return "";
+  }
+
+  const chunks = [itemsPayload];
+  const encodedName = encodeReviewField(order.name, 180);
+  const encodedAddress = encodeReviewField(order.address, 460);
+  const normalizedPhone = order.phone ? digitsOnly(order.phone).slice(0, 15) : "";
+  const paymentMethod = order.paymentMethod === "cod" ? "cod" : order.paymentMethod === "bank_transfer" ? "bank_transfer" : "";
+
+  if (encodedName) {
+    chunks.push(`n=${encodedName}`);
+  }
+  if (normalizedPhone) {
+    chunks.push(`p=${normalizedPhone}`);
+  }
+  if (encodedAddress) {
+    chunks.push(`a=${encodedAddress}`);
+  }
+  if (paymentMethod) {
+    chunks.push(`m=${paymentMethod}`);
+  }
+
+  const compact = chunks.join("|");
+  if (compact.length > 900) {
+    return itemsPayload;
+  }
+  return compact;
+}
+
+function encodeReviewField(value: string | undefined, maxLength: number): string {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const encoded = Buffer.from(trimmed, "utf8").toString("base64url");
+  if (!encoded || encoded.length > maxLength) {
+    return "";
+  }
+  return encoded;
 }
 
 function serializeOrderItems(items: Array<{ sku: string; qty: number }>): string {
@@ -1185,6 +1257,26 @@ function isNegativeText(input: string): boolean {
     "khong dung roi",
   ];
   return containsNormalizedTerm(normalized, terms);
+}
+
+function looksLikeHumanName(input: string): boolean {
+  const raw = String(input || "").trim();
+  if (!raw || raw.length < 2) {
+    return false;
+  }
+  const digits = raw.replace(/\D+/g, "");
+  if (digits.length >= 3) {
+    return false;
+  }
+  const normalized = normalizeVietnamese(raw);
+  if (!normalized) {
+    return false;
+  }
+  const alphaChars = normalized.replace(/[^a-z]/g, "");
+  if (alphaChars.length < 2) {
+    return false;
+  }
+  return /\s/.test(normalized) || alphaChars.length >= 4;
 }
 
 function containsNormalizedTerm(normalized: string, terms: string[]): boolean {

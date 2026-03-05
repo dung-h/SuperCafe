@@ -101,7 +101,8 @@ class MessengerController extends BaseController {
             $job = [
                 'senderId' => $senderId,
                 'messageText' => $messageText,
-                'actionPayload' => $actionPayload
+                'actionPayload' => $actionPayload,
+                'sourceMessageId' => $eventId !== '' ? $eventId : ('msg-' . substr(sha1($senderId . '|' . (string)($event['timestamp'] ?? '')), 0, 12)),
             ];
             $redis->rpush('messenger_webhook_jobs', json_encode($job));
             $processed++;

@@ -10,8 +10,8 @@ export class DialogueEventLoggerMySql {
       await this.pool.query(
         `INSERT INTO chat_dialogue_events (
           channel, user_id, correlation_id, role, input_text, action_payload,
-          intent, state_before, state_after, tool_calls_json, latency_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          source_message_id, locale, intent, state_before, state_after, tool_calls_json, latency_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           event.channel,
           event.userId,
@@ -19,6 +19,8 @@ export class DialogueEventLoggerMySql {
           event.role,
           event.inputText ?? null,
           event.actionPayload ?? null,
+          event.sourceMessageId ?? null,
+          event.locale ?? null,
           event.intent ?? null,
           event.stateBefore ?? null,
           event.stateAfter ?? null,

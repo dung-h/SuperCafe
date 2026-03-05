@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "eval:dialogue": "tsx scripts/dialogue-eval.ts",
     "lint": "echo \"No lint configured\""
   },
   "dependencies": {

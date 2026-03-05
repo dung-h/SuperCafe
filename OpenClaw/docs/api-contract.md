@@ -52,6 +52,52 @@ Security headers for `POST /tools/*` and `POST /admin/*`:
 Base URL: `http://openclaw:8082`
 
 - `GET /health`
+- `GET /admin/kpi/summary?windowMinutes=60`
+  - yeu cau `DIALOG_ENGINE_V2_ENABLED=true`
+  - response:
+    ```json
+    {
+      "ok": true,
+      "data": {
+        "windowMinutes": 60,
+        "windowStartedAt": "2026-03-04T10:00:00.000Z",
+        "generatedAt": "2026-03-04T11:00:00.000Z",
+        "channels": [
+          {
+            "channel": "web",
+            "counters": {
+              "totalBotEvents": 120,
+              "fallbackCount": 8,
+              "orderStartCount": 30,
+              "orderCreateSuccessCount": 20,
+              "actionTotalCount": 72,
+              "actionErrorCount": 4
+            },
+            "rates": {
+              "fallbackRate": 6.67,
+              "orderWizardCompletionRate": 66.67,
+              "actionErrorRate": 5.56
+            }
+          }
+        ],
+        "overall": {
+          "counters": {
+            "totalBotEvents": 350,
+            "fallbackCount": 25,
+            "orderStartCount": 80,
+            "orderCreateSuccessCount": 49,
+            "actionTotalCount": 210,
+            "actionErrorCount": 11
+          },
+          "rates": {
+            "fallbackRate": 7.14,
+            "orderWizardCompletionRate": 61.25,
+            "actionErrorRate": 5.24
+          }
+        }
+      }
+    }
+    ```
 - `POST /chat`
   - body:
     ```json
@@ -102,9 +148,13 @@ Base URL: `http://openclaw:8082`
     ```
   - `ui.suggestions` da chuan hoa theo object `{label,payload}` cho tat ca channels.
   - payload dac biet cho UX review don:
-    - `OPEN_WEB_REVIEW:<SKU:QTY,SKU:QTY,...>`
+    - `OPEN_WEB_REVIEW:<SKU:QTY,SKU:QTY,...>|n=<base64url(name)>|p=<digits>|a=<base64url(address)>|m=bank_transfer|cod`
+    - `n/p/a/m` la optional; adapter channel se tu map thanh query `rn/rp/ra/rm` cho trang review.
     - adapter channel se map payload nay thanh nut mo URL web review (khong gui callback ve bot).
   - action payload uu tien cao hon text intent trong engine v2.
+  - engine v2 event log (`chat_dialogue_events`) luu them:
+    - `source_message_id`
+    - `locale`
   - ho tro handoff:
     - neu nguoi dung nhan tin dang \"gap tu van vien\", bot vao che do handoff.
     - engine v2: che do handoff duoc luu trong MySQL session state.

@@ -251,6 +251,8 @@ CREATE TABLE IF NOT EXISTS chat_dialogue_events (
   role ENUM('user','bot','agent','system') NOT NULL,
   input_text TEXT NULL,
   action_payload VARCHAR(255) NULL,
+  source_message_id VARCHAR(128) NULL,
+  locale VARCHAR(32) NULL,
   intent VARCHAR(64) NULL,
   state_before VARCHAR(64) NULL,
   state_after VARCHAR(64) NULL,

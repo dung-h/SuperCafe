@@ -13,6 +13,21 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: OpenClaw/package-lock.json
+
+    - name: Install OpenClaw dependencies
+      working-directory: OpenClaw
+      run: npm ci
+
+    - name: Run Dialogue Eval Regression
+      working-directory: OpenClaw
+      run: npm run -w @openclaw/openclaw eval:dialogue
+
     - name: Prepare environment variables
       run: |
         cp milestone.env.example .env
@@ -34,3 +49,6 @@ jobs:
 
     - name: Run Messenger Webhook Smoke Test
       run: ./scripts/messenger-webhook-smoke.sh
+
+    - name: Run Omnichannel Smoke Test
+      run: ./scripts/omnichannel-smoke.sh

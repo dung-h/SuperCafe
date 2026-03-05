@@ -27,11 +27,13 @@ Background:
      - `PUBLIC_BASE_URL=https://<your-domain>`
      - `WEB_BRIDGE_API_KEY=<shared-secret>`
      - `MESSENGER_VERIFY_TOKEN`, `MESSENGER_APP_SECRET`, `MESSENGER_PAGE_ACCESS_TOKEN`
-      - `TELEGRAM_MINI_APP_URL` (optional, must be public HTTPS)
-      - `EXTERNAL_SESSION_SECRET` (shared signing secret for Telegram->Web identity bridge)
-      - `EXTERNAL_SESSION_TTL_SEC` (default `86400`)
-      - `DIALOG_ENGINE_V2_ENABLED=true|false` (default `false`, rollout safe)
-      - `DIALOG_SESSION_TTL_HOURS` (default `24`)
+     - `MESSENGER_AUTO_PROFILE_SETUP=true|false` (default `true`)
+     - `TELEGRAM_MINI_APP_URL` (optional, must be public HTTPS)
+     - `EXTERNAL_SESSION_SECRET` (shared signing secret for Telegram->Web identity bridge)
+     - `EXTERNAL_SESSION_TTL_SEC` (default `86400`)
+     - `DIALOG_ENGINE_V2_ENABLED=true|false` (default `false`, rollout safe)
+     - `DIALOG_SESSION_TTL_HOURS` (default `24`)
+     - `DB_NAME` (production DB name; fallback now supports both `lowland_coffee` and `lowland_db`)
    - Edit `OpenClaw/infra/env/.env`.
    - Set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
 2. Start stack:
@@ -92,7 +94,30 @@ Run after deploy:
 
 ```bash
 ./scripts/chatbot-smoke.sh
+./scripts/omnichannel-smoke.sh
+./scripts/sre-alert-check.sh
 ```
+
+Regression quality gate (NLU/FSM):
+
+```bash
+cd OpenClaw
+npm run -w @openclaw/openclaw eval:dialogue
+```
+
+Report path:
+- `OpenClaw/services/openclaw/.artifacts/dialogue-eval-report.json`
+
+Observability alert check (5-minute window by default):
+
+- KPI thresholds:
+  - `MAX_FALLBACK_RATE` (default `12`)
+  - `MAX_ACTION_ERROR_RATE` (default `3`)
+  - `MIN_ORDER_COMPLETION_RATE` (default `55`)
+  - `MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT` (default `5`, avoid low-traffic false positives)
+- Delivery thresholds:
+  - `MAX_WEBHOOK_SEND_FAIL_RATE` (default `3`)
+  - `MAX_DB_ERROR_RATE` (default `1`)
 
 Or run manually:
 
@@ -109,7 +134,44 @@ Expected:
 - `data.ui.items` has menu cards for web widget
 - `data.ui.suggestions[]` has `{label,payload}`
 
+## KPI summary (dialogue v2)
+
+When `DIALOG_ENGINE_V2_ENABLED=true`, OpenClaw exposes:
+
+- `GET /admin/kpi/summary?windowMinutes=60`
+
+Response includes:
+- `channels[].rates.fallbackRate`
+- `channels[].rates.orderWizardCompletionRate`
+- `channels[].rates.actionErrorRate`
+- `overall` aggregated counters/rates for all channels
+
 ## Security warning
 
 - Do not commit real secrets.
 - Keep secrets only in local/server `.env` files and rotate any leaked keys before release.
+
+## Deploy under `/lowlandcoffee`
+
+Supported, but set base URL explicitly:
+- `PUBLIC_BASE_URL=https://dungho.io.vn/lowlandcoffee`
+
+Nginx sample:
+
+```nginx
+location ^~ /lowlandcoffee/ {
+    alias /var/www/supercafe/LTW251/public/;
+    index index.php;
+    try_files $uri $uri/ /lowlandcoffee/index.php?$query_string;
+}
+
+location ~ ^/lowlandcoffee/(.+\\.php)$ {
+    alias /var/www/supercafe/LTW251/public/$1;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME /var/www/supercafe/LTW251/public/$1;
+    fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+}
+```
+
+Note:
+- Legacy links dạng `/?r=...` đã có lớp rewrite runtime để tương thích khi chạy dưới subpath.

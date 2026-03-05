@@ -21,6 +21,7 @@ class MessengerWorker {
             'read_write_timeout' => 0,
         ]);
         worker_log('Connected Redis host=' . REDIS_HOST . ' port=' . (string)REDIS_PORT);
+        $this->maybeBootstrapMessengerProfile();
     }
 
     public function run() {
@@ -54,6 +55,7 @@ class MessengerWorker {
         $senderId = $payload['senderId'] ?? '';
         $messageText = $payload['messageText'] ?? '';
         $actionPayload = $payload['actionPayload'] ?? '';
+        $sourceMessageId = trim((string)($payload['sourceMessageId'] ?? ''));
         $actionPayload = $this->normalizeIncomingActionPayload((string)$actionPayload, (string)$messageText);
 
         if ($senderId === '' || ($messageText === '' && $actionPayload === '')) {
@@ -67,14 +69,19 @@ class MessengerWorker {
         worker_log(
             'Processing sender=' . $senderId .
             ' text="' . mb_substr($messageText, 0, 80) . '"' .
-            ($actionPayload !== '' ? ' action=' . $actionPayload : '')
+            ($actionPayload !== '' ? ' action=' . $actionPayload : '') .
+            ($sourceMessageId !== '' ? ' source=' . $sourceMessageId : '')
         );
+
+        if ($this->maybeSendFirstContactWelcome((string)$senderId, (string)$messageText, (string)$actionPayload)) {
+            return;
+        }
 
         // 1. Send Typing Action
         $this->sendMessengerAction($senderId, 'typing_on');
 
         // 2. Ask OpenClaw
-        $response = $this->askOpenClaw($senderId, $messageText, $actionPayload);
+        $response = $this->askOpenClaw($senderId, $messageText, $actionPayload, $sourceMessageId);
         $replyText = trim((string)($response['reply'] ?? ''));
         $ui = is_array($response['ui'] ?? null) ? $response['ui'] : null;
         $suggestions = $this->normalizeSuggestions($ui['suggestions'] ?? null);
@@ -88,7 +95,13 @@ class MessengerWorker {
                 // Send text first without suggestions
                 $this->sendMessengerText($senderId, $replyText);
                 // Then send carousel with suggestions
-                $this->sendMessengerMenu($senderId, $ui['items'], $suggestions);
+                $menuSent = $this->sendMessengerMenu($senderId, $ui['items'], $suggestions);
+                if (!$menuSent) {
+                    $fallbackText = $this->buildMenuFallbackText($ui['items']);
+                    if ($fallbackText !== '') {
+                        $this->sendMessengerText($senderId, $fallbackText, $suggestions);
+                    }
+                }
                 if ($reviewUrl !== '') {
                     $this->sendMessengerWebReviewButton($senderId, $reviewUrl);
                 }
@@ -105,19 +118,22 @@ class MessengerWorker {
         worker_log('Skip sending because reply text is empty');
     }
 
-    private function askOpenClaw($senderId, $message, $actionPayload = '') {
+    private function askOpenClaw($senderId, $message, $actionPayload = '', $sourceMessageId = '') {
         $request = [
             'userId' => 'messenger-' . $senderId,
             'message' => $message,
             'channel' => 'messenger',
             'correlationId' => 'msgr-worker-' . substr(sha1(uniqid('', true)), 0, 16),
-            'clientContext' => ['locale' => 'vi-VN'],
+            'clientContext' => [
+                'locale' => 'vi-VN',
+                'sourceMessageId' => $sourceMessageId !== '' ? $sourceMessageId : ('msg-' . substr(sha1((string)microtime(true) . (string)$senderId), 0, 10)),
+            ],
         ];
         if (is_string($actionPayload) && trim($actionPayload) !== '') {
             $request['actionPayload'] = trim($actionPayload);
         }
 
-        $result = $this->postJson(OPENCLAW_URL . '/chat', $request, OPENCLAW_TIMEOUT_MS);
+        $result = $this->postJson(OPENCLAW_URL . '/chat', $request, OPENCLAW_TIMEOUT_MS, 2);
         if (!$result['ok']) {
             worker_log(
                 'OpenClaw call failed status=' . (string)($result['status'] ?? 0) .
@@ -169,7 +185,7 @@ class MessengerWorker {
             'message' => $message,
         ];
 
-        $result = $this->postJson($url, $payload, 20000);
+        $result = $this->postJson($url, $payload, 20000, 3);
         if (!$result['ok']) {
             $errorText = $this->resolveGraphError($result);
             worker_log('Send text failed status=' . (string)($result['status'] ?? 0) . ' error=' . $errorText);
@@ -195,11 +211,15 @@ class MessengerWorker {
             if (strpos($img, '/') === 0) {
                 $img = rtrim(BASE_URL, '/') . $img;
             }
+            $img = trim((string)$img);
+            if ($img !== '' && stripos($img, 'https://') !== 0) {
+                // Messenger template is strict with media URL; fallback to text if image URL is not HTTPS.
+                $img = '';
+            }
 
-            $elements[] = [
+            $element = [
                 'title' => mb_substr($item['name'] . ' (' . number_format((float)$item['priceVnd']) . ' đ)', 0, 80),
                 'subtitle' => mb_substr($item['description'] ?? '', 0, 80),
-                'image_url' => $img,
                 'buttons' => [
                     [
                         'type' => 'postback',
@@ -208,6 +228,10 @@ class MessengerWorker {
                     ]
                 ]
             ];
+            if ($img !== '') {
+                $element['image_url'] = $img;
+            }
+            $elements[] = $element;
             $count++;
         }
         if (count($elements) === 0) {
@@ -237,7 +261,7 @@ class MessengerWorker {
             'message' => $message,
         ];
 
-        $result = $this->postJson($url, $payload, 20000);
+        $result = $this->postJson($url, $payload, 20000, 3);
         if (!$result['ok']) {
             $errorText = $this->resolveGraphError($result);
             worker_log('Send menu failed status=' . (string)($result['status'] ?? 0) . ' error=' . $errorText);
@@ -245,6 +269,35 @@ class MessengerWorker {
         }
         worker_log('Send menu success recipient=' . $recipientId . ' elements=' . (string)count($elements));
         return $result['ok'];
+    }
+
+    private function buildMenuFallbackText($items): string {
+        if (!is_array($items) || count($items) === 0) {
+            return '';
+        }
+
+        $lines = ["Danh sách món gợi ý:"];
+        $count = 0;
+        foreach ($items as $item) {
+            if ($count >= 8) {
+                break;
+            }
+            $name = trim((string)($item['name'] ?? ''));
+            $sku = strtoupper(trim((string)($item['sku'] ?? '')));
+            if ($name === '' || $sku === '') {
+                continue;
+            }
+            $price = number_format((float)($item['priceVnd'] ?? 0), 0, ',', '.');
+            $lines[] = '- ' . $name . ' (' . $sku . ') - ' . $price . ' đ';
+            $count++;
+        }
+
+        if ($count === 0) {
+            return '';
+        }
+
+        $lines[] = "Bạn có thể bấm nút gợi ý hoặc nhắn theo mẫu SKU:SL (ví dụ CAFE-SUA:2).";
+        return implode("\n", $lines);
     }
 
     private function sendMessengerWebReviewButton($recipientId, $url) {
@@ -278,7 +331,7 @@ class MessengerWorker {
             'message' => $message,
         ];
 
-        $result = $this->postJson($urlApi, $payload, 20000);
+        $result = $this->postJson($urlApi, $payload, 20000, 3);
         if (!$result['ok']) {
             $errorText = $this->resolveGraphError($result);
             worker_log('Send web review button failed status=' . (string)($result['status'] ?? 0) . ' error=' . $errorText);
@@ -301,8 +354,115 @@ class MessengerWorker {
             'sender_action' => $action,
         ];
 
-        $this->postJson($url, $payload, 5000);
+        $this->postJson($url, $payload, 5000, 1);
         return true;
+    }
+
+    private function maybeSendFirstContactWelcome(string $senderId, string $messageText, string $actionPayload): bool {
+        if (!$this->markMessengerUserSeen($senderId)) {
+            return false;
+        }
+
+        worker_log('First-contact onboarding sender=' . $senderId);
+        $welcomeSuggestions = [
+            ['label' => 'Xem menu', 'payload' => 'ACTION_VIEW_MENU'],
+            ['label' => 'Đặt đơn', 'payload' => 'ACTION_ORDER_START'],
+            ['label' => 'Kiểm tra đơn', 'payload' => 'ACTION_ORDER_STATUS'],
+            ['label' => 'Gặp tư vấn viên', 'payload' => 'ACTION_HANDOFF_REQUEST'],
+        ];
+        $this->sendMessengerText(
+            $senderId,
+            "Xin chào! Mình là trợ lý Lowland Coffee.\nBạn có thể xem menu, đặt đơn và theo dõi đơn ngay tại đây.",
+            $welcomeSuggestions
+        );
+
+        $normalizedAction = strtoupper(trim($actionPayload));
+        $normalizedText = strtolower(trim($messageText));
+        $isIntroOnly = ($normalizedAction === '' && $normalizedText === '')
+            || $normalizedAction === 'ACTION_HELP'
+            || $normalizedAction === 'GET_STARTED'
+            || $normalizedText === 'get started';
+
+        return $isIntroOnly;
+    }
+
+    private function markMessengerUserSeen(string $senderId): bool {
+        $native = preg_replace('/\D+/', '', $senderId);
+        if ($native === '') {
+            return false;
+        }
+        $key = 'messenger_user_seen:' . $native;
+        try {
+            $set = $this->redis->setnx($key, (string)time());
+            if (!$set) {
+                return false;
+            }
+            $this->redis->expire($key, 120 * 24 * 3600);
+            return true;
+        } catch (\Throwable $e) {
+            worker_log('markMessengerUserSeen failed: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    private function maybeBootstrapMessengerProfile(): void {
+        if (!defined('MESSENGER_AUTO_PROFILE_SETUP') || !MESSENGER_AUTO_PROFILE_SETUP) {
+            return;
+        }
+        $pageToken = (string)MESSENGER_PAGE_ACCESS_TOKEN;
+        if ($pageToken === '') {
+            return;
+        }
+
+        try {
+            $lockKey = 'messenger_profile_setup:v2';
+            $set = $this->redis->setnx($lockKey, (string)time());
+            if (!$set) {
+                return;
+            }
+            $this->redis->expire($lockKey, 6 * 3600);
+        } catch (\Throwable $e) {
+            worker_log('profile setup lock failed: ' . $e->getMessage());
+        }
+
+        $url = 'https://graph.facebook.com/' . rawurlencode((string)MESSENGER_GRAPH_VERSION) . '/me/messenger_profile?access_token=' . rawurlencode($pageToken);
+        $payload = [
+            'get_started' => [
+                'payload' => 'ACTION_HELP',
+            ],
+            'greeting' => [
+                [
+                    'locale' => 'default',
+                    'text' => 'Xin chào! Mình là trợ lý Lowland Coffee. Bạn có thể xem menu, đặt món và theo dõi đơn ngay tại đây.',
+                ],
+            ],
+            'ice_breakers' => [
+                ['question' => 'Quán có các món nào?', 'payload' => 'ACTION_VIEW_MENU'],
+                ['question' => 'Cho mình đặt đồ uống', 'payload' => 'ACTION_ORDER_START'],
+                ['question' => 'Kiểm tra đơn hàng', 'payload' => 'ACTION_ORDER_STATUS'],
+            ],
+            'persistent_menu' => [
+                [
+                    'locale' => 'default',
+                    'composer_input_disabled' => false,
+                    'call_to_actions' => [
+                        ['type' => 'postback', 'title' => 'Xem menu', 'payload' => 'ACTION_VIEW_MENU'],
+                        ['type' => 'postback', 'title' => 'Đặt đơn', 'payload' => 'ACTION_ORDER_START'],
+                        ['type' => 'postback', 'title' => 'Kiểm tra đơn', 'payload' => 'ACTION_ORDER_STATUS'],
+                        ['type' => 'postback', 'title' => 'Gặp tư vấn viên', 'payload' => 'ACTION_HANDOFF_REQUEST'],
+                        ['type' => 'web_url', 'title' => 'Mở website', 'url' => rtrim((string)BASE_URL, '/'), 'webview_height_ratio' => 'full'],
+                    ],
+                ],
+            ],
+        ];
+
+        $result = $this->postJson($url, $payload, 20000, 2);
+        if (!$result['ok']) {
+            $errorText = $this->resolveGraphError($result);
+            worker_log('Bootstrap messenger profile failed status=' . (string)($result['status'] ?? 0) . ' error=' . $errorText);
+            return;
+        }
+        worker_log('Bootstrap messenger profile success');
     }
 
     private function resolveGraphError(array $result): string {
@@ -361,16 +521,49 @@ class MessengerWorker {
     }
 
     private function buildOrderReviewUrlFromPayload(string $payload, string $nativeUserId): string {
-        $prefix = 'OPEN_WEB_REVIEW:';
-        if (stripos($payload, $prefix) !== 0) {
-            return '';
-        }
-        $encodedItems = trim(substr($payload, strlen($prefix)));
-        if ($encodedItems === '' || strlen($encodedItems) > 700) {
+        $parsed = $this->parseOrderReviewPayload($payload);
+        if (!is_array($parsed) || empty($parsed['items'])) {
             return '';
         }
 
-        $pairs = explode(',', $encodedItems);
+        $base = rtrim((string)BASE_URL, '/')
+            . '/?r=site/orderReview&items=' . rawurlencode((string)$parsed['items'])
+            . '&ch=messenger';
+        if ($nativeUserId !== '') {
+            $base .= '&uid=' . rawurlencode($nativeUserId);
+        }
+        if (!empty($parsed['name'])) {
+            $base .= '&rn=' . rawurlencode((string)$parsed['name']);
+        }
+        if (!empty($parsed['phone'])) {
+            $base .= '&rp=' . rawurlencode((string)$parsed['phone']);
+        }
+        if (!empty($parsed['address'])) {
+            $base .= '&ra=' . rawurlencode((string)$parsed['address']);
+        }
+        if (!empty($parsed['payment'])) {
+            $base .= '&rm=' . rawurlencode((string)$parsed['payment']);
+        }
+        return $base;
+    }
+
+    private function parseOrderReviewPayload(string $payload): ?array {
+        $prefix = 'OPEN_WEB_REVIEW:';
+        if (stripos($payload, $prefix) !== 0) {
+            return null;
+        }
+        $body = trim(substr($payload, strlen($prefix)));
+        if ($body === '' || strlen($body) > 1200) {
+            return null;
+        }
+
+        $parts = explode('|', $body);
+        $itemsPart = strtoupper(trim((string)array_shift($parts)));
+        if ($itemsPart === '') {
+            return null;
+        }
+
+        $pairs = explode(',', $itemsPart);
         $normalized = [];
         foreach ($pairs as $pair) {
             $part = strtoupper(trim($pair));
@@ -384,16 +577,74 @@ class MessengerWorker {
         }
 
         if (count($normalized) === 0) {
-            return '';
+            return null;
         }
 
-        $base = rtrim((string)BASE_URL, '/')
-            . '/?r=site/orderReview&items=' . rawurlencode(implode(',', $normalized))
-            . '&ch=messenger';
-        if ($nativeUserId !== '') {
-            $base .= '&uid=' . rawurlencode($nativeUserId);
+        $meta = [
+            'name' => '',
+            'phone' => '',
+            'address' => '',
+            'payment' => '',
+        ];
+        foreach ($parts as $part) {
+            $chunk = trim((string)$part);
+            if ($chunk === '' || strpos($chunk, '=') === false) {
+                continue;
+            }
+            [$keyRaw, $valueRaw] = explode('=', $chunk, 2);
+            $key = strtolower(trim((string)$keyRaw));
+            $value = trim((string)$valueRaw);
+            if ($value === '') {
+                continue;
+            }
+            if ($key === 'n') {
+                $meta['name'] = $this->decodeCompactReviewField($value);
+                continue;
+            }
+            if ($key === 'p') {
+                $digits = preg_replace('/\D+/', '', $value);
+                $meta['phone'] = substr((string)$digits, 0, 15);
+                continue;
+            }
+            if ($key === 'a') {
+                $meta['address'] = $this->decodeCompactReviewField($value);
+                continue;
+            }
+            if ($key === 'm') {
+                $payment = strtolower($value);
+                if ($payment === 'bank_transfer' || $payment === 'cod') {
+                    $meta['payment'] = $payment;
+                }
+            }
         }
-        return $base;
+
+        return [
+            'items' => implode(',', $normalized),
+            'name' => $meta['name'],
+            'phone' => $meta['phone'],
+            'address' => $meta['address'],
+            'payment' => $meta['payment'],
+        ];
+    }
+
+    private function decodeCompactReviewField(string $value): string {
+        $encoded = trim($value);
+        if ($encoded === '') {
+            return '';
+        }
+        if (!preg_match('/^[A-Za-z0-9\-_]+$/', $encoded)) {
+            return '';
+        }
+        $base64 = strtr($encoded, '-_', '+/');
+        $mod = strlen($base64) % 4;
+        if ($mod > 0) {
+            $base64 .= str_repeat('=', 4 - $mod);
+        }
+        $decoded = base64_decode($base64, true);
+        if ($decoded === false) {
+            return '';
+        }
+        return trim((string)$decoded);
     }
 
     private function mapLegacySuggestionPayload(string $label): string {
@@ -436,34 +687,74 @@ class MessengerWorker {
         return trim($messageText) === '' ? $payload : '';
     }
 
-    private function postJson($url, $body, $timeoutMs) {
+    private function postJson($url, $body, $timeoutMs, $maxAttempts = 1) {
         $json = json_encode($body, JSON_UNESCAPED_UNICODE);
         $headers = [
             'Content-Type: application/json',
             'Content-Length: ' . strlen((string)$json)
         ];
-        
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $json);
-        curl_setopt($ch, CURLOPT_TIMEOUT, max(1, (int)ceil($timeoutMs / 1000)));
-        $response = curl_exec($ch);
-        $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
-        curl_close($ch);
+        $attempts = max(1, (int)$maxAttempts);
+        $lastResult = ['ok' => false, 'status' => 0, 'error' => 'request_failed'];
 
-        if ($response === false) {
-            return ['ok' => false, 'status' => $statusCode, 'error' => $curlError !== '' ? $curlError : 'request_failed'];
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $json);
+            curl_setopt($ch, CURLOPT_TIMEOUT, max(1, (int)ceil($timeoutMs / 1000)));
+            $response = curl_exec($ch);
+            $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if ($response === false) {
+                $lastResult = ['ok' => false, 'status' => $statusCode, 'error' => $curlError !== '' ? $curlError : 'request_failed'];
+            } else {
+                $decoded = json_decode($response, true);
+                $okStatus = $statusCode >= 200 && $statusCode < 300;
+                if (!is_array($decoded)) {
+                    $decoded = [];
+                }
+                $lastResult = ['ok' => $okStatus, 'status' => $statusCode, 'data' => $decoded];
+            }
+
+            if (!empty($lastResult['ok'])) {
+                $lastResult['attempts'] = $attempt;
+                return $lastResult;
+            }
+
+            if ($attempt < $attempts && $this->shouldRetryRequest($url, $statusCode, $lastResult['data'] ?? null, (string)($lastResult['error'] ?? ''))) {
+                usleep((int)(250000 * $attempt));
+                continue;
+            }
+
+            $lastResult['attempts'] = $attempt;
+            return $lastResult;
         }
 
-        $decoded = json_decode($response, true);
-        $okStatus = $statusCode >= 200 && $statusCode < 300;
-        if (!is_array($decoded)) {
-            return ['ok' => $okStatus, 'status' => $statusCode, 'data' => []];
+        return $lastResult;
+    }
+
+    private function shouldRetryRequest(string $url, int $statusCode, $decoded, string $errorText): bool {
+        $isGraphApi = stripos($url, 'graph.facebook.com') !== false;
+        if (!$isGraphApi) {
+            return false;
         }
-        return ['ok' => $okStatus, 'status' => $statusCode, 'data' => $decoded];
+
+        if (trim($errorText) !== '') {
+            return true;
+        }
+        if ($statusCode === 0 || $statusCode === 429 || $statusCode >= 500) {
+            return true;
+        }
+
+        if (!is_array($decoded) || !is_array($decoded['error'] ?? null)) {
+            return false;
+        }
+
+        $code = (int)($decoded['error']['code'] ?? 0);
+        return in_array($code, [1, 2, 4, 17, 32, 613], true);
     }
 }
 

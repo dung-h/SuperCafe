@@ -127,6 +127,8 @@ export type DialogueEventLog = {
   role: "user" | "bot" | "agent" | "system";
   inputText?: string;
   actionPayload?: string;
+  sourceMessageId?: string;
+  locale?: string;
   intent?: string;
   stateBefore?: DialogueStateName;
   stateAfter?: DialogueStateName;

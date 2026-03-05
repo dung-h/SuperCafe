@@ -1088,13 +1088,8 @@ function buildOrderReviewUrlForUser(
   from: { id?: number; first_name?: string; last_name?: string; username?: string } | undefined,
   payload: string,
 ): string | undefined {
-  const prefix = "OPEN_WEB_REVIEW:";
-  if (!payload || !payload.startsWith(prefix)) {
-    return undefined;
-  }
-
-  const parsedItems = normalizeReviewItemsPayload(payload.slice(prefix.length));
-  if (!parsedItems) {
+  const parsed = parseOrderReviewPayload(payload);
+  if (!parsed) {
     return undefined;
   }
 
@@ -1105,12 +1100,86 @@ function buildOrderReviewUrlForUser(
 
   const url = new URL(base);
   url.searchParams.set("r", "site/orderReview");
-  url.searchParams.set("items", parsedItems);
+  url.searchParams.set("items", parsed.items);
   url.searchParams.set("ch", "telegram");
   if (from?.id) {
     url.searchParams.set("uid", String(from.id));
   }
+  if (parsed.name) {
+    url.searchParams.set("rn", parsed.name);
+  }
+  if (parsed.phone) {
+    url.searchParams.set("rp", parsed.phone);
+  }
+  if (parsed.address) {
+    url.searchParams.set("ra", parsed.address);
+  }
+  if (parsed.payment) {
+    url.searchParams.set("rm", parsed.payment);
+  }
   return url.toString();
+}
+
+function parseOrderReviewPayload(rawPayload: string): { items: string; name?: string; phone?: string; address?: string; payment?: string } | undefined {
+  const prefix = "OPEN_WEB_REVIEW:";
+  if (!rawPayload || !rawPayload.startsWith(prefix)) {
+    return undefined;
+  }
+  const body = String(rawPayload.slice(prefix.length) || "").trim();
+  if (!body || body.length > 1200) {
+    return undefined;
+  }
+
+  const chunks = body.split("|").map((part) => part.trim()).filter(Boolean);
+  const itemsRaw = chunks.shift() || "";
+  const parsedItems = normalizeReviewItemsPayload(itemsRaw);
+  if (!parsedItems) {
+    return undefined;
+  }
+
+  const meta: { items: string; name?: string; phone?: string; address?: string; payment?: string } = {
+    items: parsedItems,
+  };
+  for (const chunk of chunks) {
+    const pivot = chunk.indexOf("=");
+    if (pivot <= 0) {
+      continue;
+    }
+    const key = chunk.slice(0, pivot).trim().toLowerCase();
+    const value = chunk.slice(pivot + 1).trim();
+    if (!value) {
+      continue;
+    }
+    if (key === "n") {
+      const decoded = decodeReviewField(value);
+      if (decoded) {
+        meta.name = decoded;
+      }
+      continue;
+    }
+    if (key === "a") {
+      const decoded = decodeReviewField(value);
+      if (decoded) {
+        meta.address = decoded;
+      }
+      continue;
+    }
+    if (key === "p") {
+      const digits = value.replace(/\D+/g, "").slice(0, 15);
+      if (digits) {
+        meta.phone = digits;
+      }
+      continue;
+    }
+    if (key === "m") {
+      const payment = value.toLowerCase();
+      if (payment === "bank_transfer" || payment === "cod") {
+        meta.payment = payment;
+      }
+    }
+  }
+
+  return meta;
 }
 
 function normalizeReviewItemsPayload(rawItems: string): string | undefined {
@@ -1138,6 +1207,19 @@ function normalizeReviewItemsPayload(rawItems: string): string | undefined {
     return undefined;
   }
   return normalized.join(",");
+}
+
+function decodeReviewField(encoded: string): string | undefined {
+  const raw = String(encoded || "").trim();
+  if (!raw || !/^[A-Za-z0-9\-_]+$/.test(raw)) {
+    return undefined;
+  }
+  try {
+    const decoded = Buffer.from(raw, "base64url").toString("utf8").trim();
+    return decoded || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function buildTelegramSessionToken(from: { id: number; first_name?: string; last_name?: string; username?: string }): string | undefined {
