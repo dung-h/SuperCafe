@@ -79,7 +79,7 @@ const ORDER_START_TERMS = [
   "goi mon",
   "len don",
   "order",
-  "mua",
+  "mua hang",
   "cho toi dat",
   "bat dau dat",
   "dat ngay",
@@ -289,7 +289,7 @@ function normalizeVietnamese(value: string): string {
 }
 
 function containsAny(source: string, terms: string[]): boolean {
-  return terms.some((term) => source.includes(term));
+  return terms.some((term) => hasTerm(source, term));
 }
 
 function equalsAny(source: string, terms: string[]): boolean {
@@ -297,7 +297,23 @@ function equalsAny(source: string, terms: string[]): boolean {
 }
 
 function containsAll(source: string, terms: string[]): boolean {
-  return terms.every((term) => source.includes(term));
+  return terms.every((term) => hasTerm(source, term));
+}
+
+function hasTerm(source: string, term: string): boolean {
+  const normalizedTerm = term.trim().toLowerCase();
+  if (!normalizedTerm) {
+    return false;
+  }
+  if (normalizedTerm.includes(" ")) {
+    return source.includes(normalizedTerm);
+  }
+  const pattern = new RegExp(`(?:^|\\s)${escapeRegex(normalizedTerm)}(?:$|\\s)`);
+  return pattern.test(source);
+}
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isHelpQuery(normalized: string): boolean {

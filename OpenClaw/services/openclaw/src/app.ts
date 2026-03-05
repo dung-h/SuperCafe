@@ -166,6 +166,7 @@ export function createApp(config: OpenClawConfig) {
         try {
           result = await handleWithDialogueEngine(
             config,
+            llmClient,
             dialogueStateStore,
             dialogueEventLogger,
             backend,
@@ -279,6 +280,7 @@ export function createApp(config: OpenClawConfig) {
 
 async function handleWithDialogueEngine(
   config: OpenClawConfig,
+  llmClient: LlmClient,
   stateStore: DialogueStateStoreMySql,
   eventLogger: DialogueEventLoggerMySql,
   backend: ReturnType<typeof buildBackend>,
@@ -313,6 +315,28 @@ async function handleWithDialogueEngine(
     session,
   );
 
+  let reply: ChatResult["reply"] = result.reply;
+  let alerts: ChatResult["alerts"] = result.alerts;
+  let ui: ChatResult["ui"] = result.ui;
+  let intent = result.intent;
+  const toolCalls = [...(result.toolCalls || [])];
+
+  if (shouldRunLlmFallback(result.intent, session.state, payload.message, payload.actionPayload)) {
+    try {
+      const classification = await classifyIntent(llmClient, payload.message);
+      const llmResult = await handleIntent(config, llmClient, backend, payload, classification, payload.correlationId);
+      if (llmResult.reply && !isGenericFallbackReply(llmResult.reply)) {
+        reply = llmResult.reply;
+        alerts = llmResult.alerts;
+        ui = llmResult.ui;
+        intent = `fallback_llm_${classification.intent}`;
+        toolCalls.push(`llm_fallback:${classification.intent}`);
+      }
+    } catch {
+      // Keep deterministic FSM fallback when LLM path fails.
+    }
+  }
+
   await stateStore.saveSession(payload.channel, payload.userId, result.nextState, result.nextContext);
 
   const latencyMs = Date.now() - startedAt;
@@ -321,24 +345,51 @@ async function handleWithDialogueEngine(
     userId: payload.userId,
     correlationId: payload.correlationId,
     role: "bot",
-    inputText: result.reply,
+    inputText: reply,
     actionPayload: payload.actionPayload,
     sourceMessageId: payload.clientContext?.sourceMessageId,
     locale: payload.clientContext?.locale,
-    intent: result.intent,
+    intent,
     stateBefore: session.state,
     stateAfter: result.nextState,
-    toolCallsJson: result.toolCalls?.length ? JSON.stringify(result.toolCalls) : undefined,
+    toolCallsJson: toolCalls.length ? JSON.stringify(toolCalls) : undefined,
     latencyMs,
   };
   await eventLogger.log(botEvent);
 
   return {
-    reply: result.reply,
-    alerts: result.alerts,
-    ui: result.ui,
+    reply,
+    alerts,
+    ui,
     state: result.state,
   };
+}
+
+function shouldRunLlmFallback(
+  policyIntent: string | undefined,
+  stateBefore: string,
+  message: string,
+  actionPayload?: string,
+): boolean {
+  if (policyIntent !== "fallback") {
+    return false;
+  }
+  if ((actionPayload || "").trim().length > 0) {
+    return false;
+  }
+  if (message.trim().length < 2) {
+    return false;
+  }
+  return stateBefore === "IDLE" || stateBefore === "BROWSING_MENU";
+}
+
+function isGenericFallbackReply(reply: string): boolean {
+  const normalized = normalizeVietnamese(reply);
+  return (
+    normalized.includes("chua co thong tin") ||
+    normalized.includes("de lai cau hoi cu the hon") ||
+    normalized.includes("khong co thong tin chinh xac")
+  );
 }
 
 async function classifyIntent(llmClient: LlmClient, message: string): Promise<IntentResult> {
@@ -906,7 +957,23 @@ function normalizeVietnamese(value: string): string {
 }
 
 function containsAny(source: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => source.includes(pattern));
+  return patterns.some((pattern) => hasTerm(source, pattern));
+}
+
+function hasTerm(source: string, term: string): boolean {
+  const normalizedTerm = term.trim().toLowerCase();
+  if (!normalizedTerm) {
+    return false;
+  }
+  if (normalizedTerm.includes(" ")) {
+    return source.includes(normalizedTerm);
+  }
+  const pattern = new RegExp(`(?:^|\\s)${escapeRegex(normalizedTerm)}(?:$|\\s)`);
+  return pattern.test(source);
+}
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getPrimarySuggestions(): string[] {

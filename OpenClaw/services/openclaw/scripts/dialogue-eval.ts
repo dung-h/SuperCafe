@@ -76,7 +76,7 @@ function parserCases(): ParserEvalCase[] {
 
   push(
     buildPhrases(
-      ["dat mon", "goi mon", "dat hang", "bat dau dat", "tao don", "dat ngay", "len don", "cho toi dat", "minh muon dat", "toi muon dat", "chot mon", "order", "mua"],
+      ["dat mon", "goi mon", "dat hang", "bat dau dat", "tao don", "dat ngay", "len don", "cho toi dat", "minh muon dat", "toi muon dat", "chot mon", "order", "mua hang"],
       ["", "cho minh ", "cho toi ", "shop oi ", "bot oi "],
       commonSuffixes,
     ),

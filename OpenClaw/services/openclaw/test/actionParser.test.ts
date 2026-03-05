@@ -51,6 +51,8 @@ describe("actionParser", () => {
       { text: "cho 2 ly bạc xỉu", expected: null },
       { text: "cho 1 ly bac siu", expected: null },
       { text: "mình muốn hai ly bạc xỉu", expected: null },
+      { text: "hôm nay trời mưa ghê", expected: null },
+      { text: "kem tuyết giá bao nhiêu", expected: null },
     ];
 
     for (const entry of cases) {
