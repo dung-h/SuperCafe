@@ -93,6 +93,15 @@ export class HandoffStore {
     return sessions.sort((a, b) => b.requestedAtMs - a.requestedAtMs);
   }
 
+  async healthCheck(): Promise<{ ok: boolean; detail: string }> {
+    try {
+      await this.redis.ping();
+      return { ok: true, detail: "ok" };
+    } catch (error) {
+      return { ok: false, detail: String(error) };
+    }
+  }
+
   private keyFor(channel: Channel, userId: string): string {
     return `handoff:${channel}:${userId}`;
   }

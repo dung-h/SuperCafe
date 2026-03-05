@@ -47,6 +47,8 @@ export interface Order {
   items: OrderItem[];
   subtotalVnd: number;
   shippingVnd: number;
+  estimatedDeliveryMinutes?: number;
+  deliveryDistanceKm?: number;
   totalVnd: number;
   paymentMethod: PaymentMethod;
   paymentRef?: string;

@@ -12,10 +12,16 @@ import type {
 } from "@openclaw/shared-types";
 import { ORDER_STATUS_SET } from "./domain/orderStatus";
 import { allowedTransitions, canTransition } from "./domain/orderStatus";
+import { estimateDeliveryFromAddress, type DeliveryEstimatorConfig } from "./domain/deliveryEstimator";
 import { createId, nowIso } from "./lib/database";
 
 export type SalesServiceConfig = {
   defaultShippingVnd: number;
+  deliveryShopLat: number;
+  deliveryShopLng: number;
+  deliveryBaseEtaMinutes: number;
+  deliveryPerKmEtaMinutes: number;
+  deliveryFallbackEtaMinutes: number;
   adminWhitelistIds: string[];
   adminPassphraseHash: string;
   adminPassphrasePlain?: string;
@@ -372,7 +378,8 @@ export class SalesService {
           .run(createId("inv"), orderCode, product.sku, -item.qty, "order_create", now);
       }
 
-      const shipping = this.config.defaultShippingVnd;
+      const deliveryEstimate = estimateDeliveryFromAddress(payload.customer.address, this.deliveryConfig());
+      const shipping = deliveryEstimate.shippingVnd;
       const total = subtotal + shipping;
       const orderStatus: OrderStatus = payload.payment_method === "bank_transfer" ? "awaiting_payment" : "new";
       const orderId = createId("ord");
@@ -416,6 +423,8 @@ export class SalesService {
           items,
           subtotalVnd: subtotal,
           shippingVnd: shipping,
+          estimatedDeliveryMinutes: deliveryEstimate.estimatedDeliveryMinutes,
+          deliveryDistanceKm: deliveryEstimate.deliveryDistanceKm,
           totalVnd: total,
           paymentMethod: payload.payment_method,
           paymentRef: undefined,
@@ -742,6 +751,7 @@ export class SalesService {
   }
 
   private toOrder(row: OrderRow): Order {
+    const deliveryEstimate = estimateDeliveryFromAddress(row.customer_address, this.deliveryConfig());
     return {
       id: row.id,
       orderCode: row.order_code,
@@ -752,6 +762,8 @@ export class SalesService {
       items: JSON.parse(row.items_json) as OrderItem[],
       subtotalVnd: row.subtotal_vnd,
       shippingVnd: row.shipping_vnd,
+      estimatedDeliveryMinutes: deliveryEstimate.estimatedDeliveryMinutes,
+      deliveryDistanceKm: deliveryEstimate.deliveryDistanceKm,
       totalVnd: row.total_vnd,
       paymentMethod: row.payment_method,
       paymentRef: row.payment_ref ?? undefined,
@@ -760,6 +772,17 @@ export class SalesService {
       stockReleased: row.stock_released === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    };
+  }
+
+  private deliveryConfig(): DeliveryEstimatorConfig {
+    return {
+      defaultShippingVnd: this.config.defaultShippingVnd,
+      shopLat: this.config.deliveryShopLat,
+      shopLng: this.config.deliveryShopLng,
+      baseEtaMinutes: this.config.deliveryBaseEtaMinutes,
+      perKmEtaMinutes: this.config.deliveryPerKmEtaMinutes,
+      fallbackEtaMinutes: this.config.deliveryFallbackEtaMinutes,
     };
   }
 }

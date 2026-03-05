@@ -31,6 +31,12 @@ const envSchema = z.object({
   DIALOG_HYBRID_ASSIST_THRESHOLD: z.coerce.number().default(0.55),
   OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC: z.coerce.number().default(30),
   OPENCLAW_CHAT_RATE_LIMIT_MAX: z.coerce.number().default(30),
+  OPENCLAW_CHAT_RATE_LIMIT_BACKEND: z.enum(["memory", "redis", "auto"]).default("auto"),
+  OPENCLAW_RATE_LIMIT_REDIS_HOST: z.string().default(process.env.REDIS_HOST || "lowland_redis"),
+  OPENCLAW_RATE_LIMIT_REDIS_PORT: z.coerce.number().default(Number(process.env.REDIS_PORT || 6379)),
+  OPENCLAW_RATE_LIMIT_REDIS_PASS: z.string().optional(),
+  OPENCLAW_RATE_LIMIT_REDIS_DB: z.coerce.number().default(0),
+  OPENCLAW_RATE_LIMIT_REDIS_KEY_PREFIX: z.string().default("openclaw:chatrl"),
 });
 
 export type OpenClawConfig = {
@@ -61,6 +67,12 @@ export type OpenClawConfig = {
   dialogHybridAssistThreshold: number;
   chatRateLimitWindowSec: number;
   chatRateLimitMax: number;
+  chatRateLimitBackend: "memory" | "redis" | "auto";
+  chatRateLimitRedisHost: string;
+  chatRateLimitRedisPort: number;
+  chatRateLimitRedisPass?: string;
+  chatRateLimitRedisDb: number;
+  chatRateLimitRedisKeyPrefix: string;
 };
 
 export function readConfig(): OpenClawConfig {
@@ -93,6 +105,12 @@ export function readConfig(): OpenClawConfig {
     dialogHybridAssistThreshold: Math.min(0.95, Math.max(0.2, env.DIALOG_HYBRID_ASSIST_THRESHOLD)),
     chatRateLimitWindowSec: Math.max(5, env.OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC),
     chatRateLimitMax: Math.max(1, env.OPENCLAW_CHAT_RATE_LIMIT_MAX),
+    chatRateLimitBackend: env.OPENCLAW_CHAT_RATE_LIMIT_BACKEND,
+    chatRateLimitRedisHost: env.OPENCLAW_RATE_LIMIT_REDIS_HOST,
+    chatRateLimitRedisPort: Math.max(1, env.OPENCLAW_RATE_LIMIT_REDIS_PORT),
+    chatRateLimitRedisPass: env.OPENCLAW_RATE_LIMIT_REDIS_PASS,
+    chatRateLimitRedisDb: Math.max(0, env.OPENCLAW_RATE_LIMIT_REDIS_DB),
+    chatRateLimitRedisKeyPrefix: env.OPENCLAW_RATE_LIMIT_REDIS_KEY_PREFIX.trim() || "openclaw:chatrl",
   };
 }
 

@@ -10,6 +10,11 @@ syncAdminWhitelist(db, config.adminWhitelistIds);
 
 const service = new SalesService(db, {
   defaultShippingVnd: config.defaultShippingVnd,
+  deliveryShopLat: config.deliveryShopLat,
+  deliveryShopLng: config.deliveryShopLng,
+  deliveryBaseEtaMinutes: config.deliveryBaseEtaMinutes,
+  deliveryPerKmEtaMinutes: config.deliveryPerKmEtaMinutes,
+  deliveryFallbackEtaMinutes: config.deliveryFallbackEtaMinutes,
   adminWhitelistIds: config.adminWhitelistIds,
   adminPassphraseHash: config.adminPassphraseHash,
   adminPassphrasePlain: config.adminPassphrasePlain,

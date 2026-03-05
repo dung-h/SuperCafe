@@ -36,7 +36,11 @@ Background:
      - `DIALOG_HYBRID_ASSIST_ENABLED=true|false` (default `true`)
      - `DIALOG_HYBRID_ASSIST_THRESHOLD` (default `0.55`)
      - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`, `OPENCLAW_CHAT_RATE_LIMIT_MAX`
+     - `OPENCLAW_CHAT_RATE_LIMIT_BACKEND=memory|redis|auto` (default `auto`)
+     - `OPENCLAW_RATE_LIMIT_REDIS_HOST`, `OPENCLAW_RATE_LIMIT_REDIS_PORT`, `OPENCLAW_RATE_LIMIT_REDIS_DB`, `OPENCLAW_RATE_LIMIT_REDIS_KEY_PREFIX`
      - `MESSENGER_WEBHOOK_RATE_LIMIT_MAX`, `MESSENGER_WEBHOOK_RATE_LIMIT_WINDOW_SEC`
+     - Bot giao vận (web/messenger bridge): `BOT_DEFAULT_SHIPPING_VND`, `BOT_SHOP_LAT`, `BOT_SHOP_LNG`
+     - Sales MCP giao vận (telegram path): `DELIVERY_SHOP_LAT`, `DELIVERY_SHOP_LNG`, `DELIVERY_BASE_ETA_MINUTES`, `DELIVERY_PER_KM_ETA_MINUTES`, `DELIVERY_FALLBACK_ETA_MINUTES`
      - `DB_NAME` (production DB name; fallback now supports both `lowland_coffee` and `lowland_db`)
    - Edit `OpenClaw/infra/env/.env`.
    - Set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
@@ -72,6 +76,9 @@ Stop stack:
   - Unified customer profile:
     - OpenClaw persists profile memory in MySQL (`chat_user_profiles`, `chat_user_identities`).
     - Identity links are built per channel and can auto-link by normalized phone when available.
+  - Delivery estimate:
+    - Nếu địa chỉ có tọa độ Google Maps, backend tự tính `shippingVnd` và `estimatedDeliveryMinutes`.
+    - Nếu không có tọa độ, dùng phí ship mặc định theo env.
 - Backlog 4 tuần đầu:
   - `docs/industrial-lite-v1-backlog-weeks-1-4.md`
 
@@ -145,6 +152,13 @@ chmod +x scripts/install-sre-cron.sh
 Runbook:
 - `docs/ops-runbook.md`
 
+Ops backup / DR:
+
+```bash
+./scripts/backup-supercafe.sh
+./scripts/install-backup-cron.sh install
+```
+
 Knowledge base cho chatbot:
 - Tài liệu: `docs/lowland-coffee-chatbot-kb.md`
 - Seed FAQ vào DB:
@@ -170,6 +184,15 @@ Expected:
 When `DIALOG_ENGINE_V2_ENABLED=true`, OpenClaw exposes:
 
 - `GET /admin/kpi/summary?windowMinutes=60`
+
+Ops summary endpoint:
+- `GET /admin/ops/summary?windowMinutes=60`
+- Includes:
+  - process/memory snapshot
+  - dialogue DB connectivity check
+  - handoff Redis check
+  - chat rate-limiter backend health (redis/memory fallback)
+  - optional embedded KPI summary when dialogue v2 is enabled
 
 Response includes:
 - `channels[].rates.fallbackRate`

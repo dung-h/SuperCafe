@@ -32,6 +32,10 @@ Security headers for `POST /tools/*` and `POST /admin/*`:
     - neu key trung nhung payload khac, tra loi loi conflict
 - `POST /tools/order_get`
   - body: `{ order_code: string }`
+  - response can include:
+    - `estimatedDeliveryMinutes?: number`
+    - `deliveryDistanceKm?: number`
+  - if address contains Google Maps coordinates, shipping/ETA are estimated dynamically.
 - `POST /tools/order_list`
   - body: `{ status?: OrderStatus, from?: string, to?: string }`
 - `POST /tools/order_set_status`
@@ -102,6 +106,8 @@ Base URL: `http://openclaw:8082`
       }
     }
     ```
+- `GET /admin/ops/summary?windowMinutes=60`
+  - includes process uptime/memory, DB and Redis checks, rate limiter backend health.
 - `GET /admin/profile?channel=<telegram|web|messenger>&userId=<id>`
   - yeu cau `DIALOG_ENGINE_V2_ENABLED=true`
   - tra ve profile hop nhat cua user theo mapping identity.
@@ -135,6 +141,11 @@ Base URL: `http://openclaw:8082`
     - nguong cau hinh qua env:
       - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`
       - `OPENCLAW_CHAT_RATE_LIMIT_MAX`
+      - `OPENCLAW_CHAT_RATE_LIMIT_BACKEND` (`memory|redis|auto`)
+      - `OPENCLAW_RATE_LIMIT_REDIS_HOST`
+      - `OPENCLAW_RATE_LIMIT_REDIS_PORT`
+      - `OPENCLAW_RATE_LIMIT_REDIS_DB`
+      - `OPENCLAW_RATE_LIMIT_REDIS_KEY_PREFIX`
   - hybrid assist:
     - `DIALOG_HYBRID_ASSIST_ENABLED=true|false`
     - `DIALOG_HYBRID_ASSIST_THRESHOLD=0.2..0.95` (de xuat `0.55`)

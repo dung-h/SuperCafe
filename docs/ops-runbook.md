@@ -15,7 +15,13 @@ cd /root/SuperCafe
 ./scripts/omnichannel-smoke.sh
 ```
 
-## 3) KPI/alert check (manual)
+## 3) Ops summary (manual)
+
+```bash
+curl -sS "http://127.0.0.1:8082/admin/ops/summary?windowMinutes=60"
+```
+
+## 4) KPI/alert check (manual)
 
 ```bash
 cd /root/SuperCafe
@@ -30,7 +36,7 @@ Tune thresholds with env when needed:
 - `MAX_WEBHOOK_SEND_FAIL_RATE` (default `3`)
 - `MAX_DB_ERROR_RATE` (default `1`)
 
-## 4) Install cron every 10 minutes
+## 5) Install cron every 10 minutes
 
 ```bash
 cd /root/SuperCafe
@@ -48,7 +54,26 @@ Other commands:
 Cron output log:
 - `/var/log/supercafe/sre-alert-check.log`
 
-## 5) Messenger webhook verification sanity check
+## 6) Backup + DR (nightly cron)
+
+Manual backup:
+
+```bash
+cd /root/SuperCafe
+./scripts/backup-supercafe.sh
+```
+
+Install nightly backup cron:
+
+```bash
+cd /root/SuperCafe
+./scripts/install-backup-cron.sh install
+```
+
+Backup log:
+- `/var/log/supercafe/backup.log`
+
+## 7) Messenger webhook verification sanity check
 
 Expected behavior:
 - `GET /?r=messenger/webhook` without verify params => `403`

@@ -445,10 +445,16 @@ export class DialoguePolicyEngine {
 
         const orderCode = String(created.data.orderCode);
         const totalVnd = Number(created.data.totalVnd || 0);
+        const estimatedDeliveryMinutes = Number(created.data.estimatedDeliveryMinutes || 0);
+        const deliveryDistanceKm = Number(created.data.deliveryDistanceKm || 0);
         const isBank = String(created.data.paymentMethod || context.order.paymentMethod) === "bank_transfer";
         const paymentGuide = isBank
           ? `\nChuyển khoản: ${this.config.bankName} - ${this.config.bankAccountNumber} (${this.config.bankAccountName})\nNội dung: ${orderCode}`
           : "";
+        const deliveryGuide =
+          estimatedDeliveryMinutes > 0
+            ? `\nDự kiến giao: khoảng ${estimatedDeliveryMinutes} phút${deliveryDistanceKm > 0 ? ` (~${deliveryDistanceKm.toFixed(1)} km)` : ""}.`
+            : "";
 
         const alerts =
           input.channel === "telegram"
@@ -461,7 +467,7 @@ export class DialoguePolicyEngine {
           ...buildExecution(
             "IDLE",
             nextContext,
-            `Đã tạo đơn ${orderCode} thành công. Tổng thanh toán: ${formatVnd(totalVnd)}.${paymentGuide}`,
+            `Đã tạo đơn ${orderCode} thành công. Tổng thanh toán: ${formatVnd(totalVnd)}.${deliveryGuide}${paymentGuide}`,
             menuUi("Đơn đã tạo", [], [
               suggestion("Kiểm tra đơn", "ACTION_ORDER_STATUS"),
               suggestion("Xem menu", "ACTION_VIEW_MENU"),

@@ -14,6 +14,7 @@ import type { DialogueEventLog, UiSuggestion } from "./dialogue/types";
 import { HandoffStore } from "./handoffStore";
 import { LlmClient } from "./llmClient";
 import { logger } from "./logger";
+import { createChatRateLimiter, type RateLimiterHealth } from "./rateLimiter";
 
 type ChatChannel = "telegram" | "web" | "messenger";
 
@@ -102,6 +103,10 @@ const profileQuerySchema = z.object({
   userId: z.string().min(1),
 });
 
+const opsSummaryQuerySchema = z.object({
+  windowMinutes: z.coerce.number().int().min(5).max(24 * 60).default(60),
+});
+
 const KPI_ACTION_ERROR_INTENTS = [
   "wizard_invalid_input",
   "invalid_phone",
@@ -122,7 +127,16 @@ export function createApp(config: OpenClawConfig) {
   const llmHttpClient = new HttpClient(config.llmTimeoutMs);
   const llmClient = new LlmClient(config, llmHttpClient);
   const handoffStore = new HandoffStore();
-  const chatRateLimiter = createFixedWindowLimiter(config.chatRateLimitMax, config.chatRateLimitWindowSec);
+  const chatRateLimiter = createChatRateLimiter({
+    mode: config.chatRateLimitBackend,
+    maxRequests: config.chatRateLimitMax,
+    windowSec: config.chatRateLimitWindowSec,
+    redisHost: config.chatRateLimitRedisHost,
+    redisPort: config.chatRateLimitRedisPort,
+    redisPassword: config.chatRateLimitRedisPass,
+    redisDb: config.chatRateLimitRedisDb,
+    redisKeyPrefix: config.chatRateLimitRedisKeyPrefix,
+  });
   const dialogueStateStore = config.dialogEngineV2Enabled ? new DialogueStateStoreMySql(config) : null;
   const dialogueEventLogger = dialogueStateStore ? new DialogueEventLoggerMySql(dialogueStateStore.getPool()) : null;
   const customerProfileStore = dialogueStateStore ? new CustomerProfileStoreMySql(dialogueStateStore.getPool()) : null;
@@ -165,6 +179,23 @@ export function createApp(config: OpenClawConfig) {
     }
   });
 
+  app.get("/admin/ops/summary", async (req, res) => {
+    try {
+      const query = opsSummaryQuerySchema.parse(req.query);
+      const summary = await buildOpsSummary({
+        dialoguePool: dialogueStateStore?.getPool() || null,
+        handoffStore,
+        rateLimiterHealth: await chatRateLimiter.healthCheck(),
+        windowMinutes: query.windowMinutes,
+      });
+      res.json({ ok: true, data: summary });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      req.log.error({ error: message }, "openclaw ops summary failed");
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
   app.post("/chat", async (req, res) => {
     try {
       const payload = chatSchema.parse(req.body) as ChatRequest;
@@ -173,7 +204,7 @@ export function createApp(config: OpenClawConfig) {
       const messageText = payload.message.trim();
       const actionPayload = (payload.actionPayload || "").trim() || undefined;
       const rateKey = `${channel}:${payload.userId}`;
-      const rateLimit = chatRateLimiter.hit(rateKey);
+      const rateLimit = await chatRateLimiter.hit(rateKey);
       if (!rateLimit.allowed) {
         req.log.warn(
           {
@@ -845,9 +876,15 @@ async function handleIntent(
       order.paymentMethod === "bank_transfer"
         ? `\nThanh toán: ${config.bankName} - ${config.bankAccountNumber} (${config.bankAccountName}).\nNội dung CK: ${order.orderCode}`
         : "";
+    const etaMinutes = Number(order.estimatedDeliveryMinutes || 0);
+    const distanceKm = Number(order.deliveryDistanceKm || 0);
+    const deliveryGuide =
+      etaMinutes > 0
+        ? `\nDự kiến giao: khoảng ${etaMinutes} phút${distanceKm > 0 ? ` (~${distanceKm.toFixed(1)} km)` : ""}.`
+        : "";
 
     return {
-      reply: `Đã tạo đơn ${order.orderCode} thành công. Tổng thanh toán: ${formatVnd(order.totalVnd)}.${paymentGuide}`,
+      reply: `Đã tạo đơn ${order.orderCode} thành công. Tổng thanh toán: ${formatVnd(order.totalVnd)}.${deliveryGuide}${paymentGuide}`,
       ui: {
         type: "menu",
         title: "Đơn đã tạo",
@@ -1028,7 +1065,13 @@ function renderOrder(order: any): string {
   const itemText = (order.items || [])
     .map((item: any) => `- ${item.sku} x${item.qty} = ${formatVnd(item.qty * item.unitPriceVnd)}`)
     .join("\n");
-  return `Đơn ${order.orderCode}\nTrạng thái: ${order.status}\nTổng: ${formatVnd(order.totalVnd)}\nSản phẩm:\n${itemText}`;
+  const etaMinutes = Number(order.estimatedDeliveryMinutes || 0);
+  const distanceKm = Number(order.deliveryDistanceKm || 0);
+  const deliveryLine =
+    etaMinutes > 0
+      ? `\nDự kiến giao: ${etaMinutes} phút${distanceKm > 0 ? ` (~${distanceKm.toFixed(1)} km)` : ""}`
+      : "";
+  return `Đơn ${order.orderCode}\nTrạng thái: ${order.status}\nTổng: ${formatVnd(order.totalVnd)}${deliveryLine}\nSản phẩm:\n${itemText}`;
 }
 
 function formatVnd(value: number): string {
@@ -1375,6 +1418,83 @@ type KpiSummaryPayload = {
   };
 };
 
+type OpsSummaryPayload = {
+  generatedAt: string;
+  uptimeSec: number;
+  process: {
+    pid: number;
+    nodeVersion: string;
+    platform: string;
+  };
+  memory: {
+    rssMb: number;
+    heapUsedMb: number;
+    heapTotalMb: number;
+    externalMb: number;
+  };
+  checks: {
+    dialogueDb: { ok: boolean; detail: string };
+    handoffRedis: { ok: boolean; detail: string };
+    chatRateLimiter: RateLimiterHealth;
+  };
+  kpi?: KpiSummaryPayload;
+};
+
+async function buildOpsSummary(input: {
+  dialoguePool: Pool | null;
+  handoffStore: HandoffStore;
+  rateLimiterHealth: RateLimiterHealth;
+  windowMinutes: number;
+}): Promise<OpsSummaryPayload> {
+  const memory = process.memoryUsage();
+
+  const dialogueDbCheck = await checkDialogueDb(input.dialoguePool);
+  const handoffRedisCheck = await input.handoffStore.healthCheck();
+
+  let kpi: KpiSummaryPayload | undefined;
+  if (input.dialoguePool) {
+    try {
+      kpi = await buildKpiSummary(input.dialoguePool, input.windowMinutes);
+    } catch (error) {
+      logger.warn({ error: String(error) }, "kpi summary skipped in ops summary");
+    }
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    uptimeSec: Math.floor(process.uptime()),
+    process: {
+      pid: process.pid,
+      nodeVersion: process.version,
+      platform: process.platform,
+    },
+    memory: {
+      rssMb: toMb(memory.rss),
+      heapUsedMb: toMb(memory.heapUsed),
+      heapTotalMb: toMb(memory.heapTotal),
+      externalMb: toMb(memory.external),
+    },
+    checks: {
+      dialogueDb: dialogueDbCheck,
+      handoffRedis: handoffRedisCheck,
+      chatRateLimiter: input.rateLimiterHealth,
+    },
+    ...(kpi ? { kpi } : {}),
+  };
+}
+
+async function checkDialogueDb(pool: Pool | null): Promise<{ ok: boolean; detail: string }> {
+  if (!pool) {
+    return { ok: false, detail: "dialogue_engine_v2_disabled" };
+  }
+  try {
+    await pool.query("SELECT 1");
+    return { ok: true, detail: "ok" };
+  } catch (error) {
+    return { ok: false, detail: String(error) };
+  }
+}
+
 async function buildKpiSummary(pool: Pool, windowMinutes: number): Promise<KpiSummaryPayload> {
   const placeholders = KPI_ACTION_ERROR_INTENTS.map(() => "?").join(", ");
   const [rows] = await pool.query<any[]>(
@@ -1476,50 +1596,8 @@ function toRatePercent(numerator: number, denominator: number): number {
   return Number(((numerator / denominator) * 100).toFixed(2));
 }
 
-type RateLimitBucket = {
-  count: number;
-  resetAt: number;
-};
-
-type RateLimitResult = {
-  allowed: boolean;
-  retryAfterSec: number;
-};
-
-function createFixedWindowLimiter(maxRequests: number, windowSec: number) {
-  const buckets = new Map<string, RateLimitBucket>();
-  const windowMs = Math.max(1, windowSec) * 1000;
-
-  function cleanup(now: number): void {
-    if (buckets.size < 10_000) {
-      return;
-    }
-    for (const [key, bucket] of buckets.entries()) {
-      if (bucket.resetAt <= now) {
-        buckets.delete(key);
-      }
-    }
-  }
-
-  return {
-    hit(key: string): RateLimitResult {
-      const now = Date.now();
-      cleanup(now);
-      const current = buckets.get(key);
-      if (!current || current.resetAt <= now) {
-        buckets.set(key, { count: 1, resetAt: now + windowMs });
-        return { allowed: true, retryAfterSec: 0 };
-      }
-
-      current.count += 1;
-      if (current.count <= maxRequests) {
-        return { allowed: true, retryAfterSec: 0 };
-      }
-
-      const retryAfterSec = Math.max(1, Math.ceil((current.resetAt - now) / 1000));
-      return { allowed: false, retryAfterSec };
-    },
-  };
+function toMb(bytes: number): number {
+  return Number((bytes / (1024 * 1024)).toFixed(2));
 }
 
 function toInt(value: unknown): number {

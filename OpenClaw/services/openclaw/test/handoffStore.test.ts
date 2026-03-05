@@ -41,6 +41,10 @@ const { mockStore, MockRedis } = vi.hoisted(() => {
       return Array.from(store.keys());
     }
 
+    async ping(): Promise<"PONG"> {
+      return "PONG";
+    }
+
     private cleanupExpired(): void {
       const now = Date.now();
       for (const [key, item] of store.entries()) {

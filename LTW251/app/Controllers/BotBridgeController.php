@@ -149,6 +149,8 @@ class BotBridgeController extends BaseController {
       return '';
     }
 
+    $deliveryEstimate = $this->estimateDeliveryByAddress($customerAddress);
+
     $pdo = DB::pdo();
     try {
       $pdo->beginTransaction();
@@ -184,7 +186,7 @@ class BotBridgeController extends BaseController {
 
       $orderCode = $this->nextOrderCode($pdo);
       $subtotal = 0;
-      $shipping = 0;
+      $shipping = (int)$deliveryEstimate['shippingVnd'];
       $items = [];
 
       $selectProduct = $pdo->prepare("SELECT id, sku, name, price, stock_qty FROM products WHERE sku = ? LIMIT 1 FOR UPDATE");
@@ -702,6 +704,7 @@ class BotBridgeController extends BaseController {
     if (!is_array($items)) {
       $items = [];
     }
+    $deliveryEstimate = $this->estimateDeliveryByAddress((string)$row['customer_address']);
 
     return [
       'id' => (string)$row['id'],
@@ -713,6 +716,8 @@ class BotBridgeController extends BaseController {
       'items' => $items,
       'subtotalVnd' => (int)$row['subtotal_vnd'],
       'shippingVnd' => (int)$row['shipping_vnd'],
+      'estimatedDeliveryMinutes' => (int)$deliveryEstimate['estimatedDeliveryMinutes'],
+      'deliveryDistanceKm' => $deliveryEstimate['deliveryDistanceKm'],
       'totalVnd' => (int)$row['total_vnd'],
       'paymentMethod' => (string)$row['payment_method'],
       'paymentRef' => $row['payment_ref'],
@@ -722,5 +727,115 @@ class BotBridgeController extends BaseController {
       'createdAt' => (string)$row['created_at'],
       'updatedAt' => (string)$row['updated_at']
     ];
+  }
+
+  private function estimateDeliveryByAddress($address) {
+    $addressText = trim((string)$address);
+    $fallbackShipping = max(0, (int)BOT_DEFAULT_SHIPPING_VND);
+    $fallbackEta = max(10, (int)BOT_DELIVERY_FALLBACK_ETA_MINUTES);
+
+    $coords = $this->extractLatLngFromText($addressText);
+    if (!$coords) {
+      return [
+        'shippingVnd' => $fallbackShipping,
+        'estimatedDeliveryMinutes' => $fallbackEta,
+        'deliveryDistanceKm' => null
+      ];
+    }
+
+    $distanceKm = $this->haversineKm((float)BOT_SHOP_LAT, (float)BOT_SHOP_LNG, (float)$coords['lat'], (float)$coords['lng']);
+    $roundedDistance = round($distanceKm, 2);
+    $nearFee = max(10000, (int)round($fallbackShipping * 0.5));
+    $standardFee = max(15000, (int)round($fallbackShipping * 0.83));
+    $farBase = max(35000, $fallbackShipping);
+
+    if ($distanceKm <= 2) {
+      $shipping = $nearFee;
+    } elseif ($distanceKm <= 5) {
+      $shipping = $standardFee;
+    } else {
+      $shipping = $farBase + ((int)ceil($distanceKm - 5) * 3000);
+    }
+
+    $baseEta = max(5, (int)BOT_DELIVERY_BASE_ETA_MINUTES);
+    $perKmEta = max(1, (int)BOT_DELIVERY_PER_KM_ETA_MINUTES);
+    $eta = min(120, $baseEta + (int)ceil($distanceKm * $perKmEta));
+    if ($eta < $baseEta) {
+      $eta = $baseEta;
+    }
+
+    return [
+      'shippingVnd' => (int)$shipping,
+      'estimatedDeliveryMinutes' => (int)$eta,
+      'deliveryDistanceKm' => $roundedDistance
+    ];
+  }
+
+  private function extractLatLngFromText($input) {
+    $value = trim((string)$input);
+    if ($value === '') {
+      return null;
+    }
+
+    $decoded = rawurldecode($value);
+    $sources = [$value, $decoded];
+
+    foreach ($sources as $source) {
+      if (preg_match('/@\\s*(-?\\d{1,2}(?:\\.\\d+)?)\\s*,\\s*(-?\\d{1,3}(?:\\.\\d+)?)/', $source, $matches)) {
+        $point = $this->parseLatLngMatch($matches[1], $matches[2]);
+        if ($point) {
+          return $point;
+        }
+      }
+
+      if (preg_match('/[?&](?:q|query|ll)=\\s*(-?\\d{1,2}(?:\\.\\d+)?)\\s*,\\s*(-?\\d{1,3}(?:\\.\\d+)?)/i', $source, $matches)) {
+        $point = $this->parseLatLngMatch($matches[1], $matches[2]);
+        if ($point) {
+          return $point;
+        }
+      }
+
+      if (preg_match('/!3d\\s*(-?\\d{1,2}(?:\\.\\d+)?)!4d\\s*(-?\\d{1,3}(?:\\.\\d+)?)/i', $source, $matches)) {
+        $point = $this->parseLatLngMatch($matches[1], $matches[2]);
+        if ($point) {
+          return $point;
+        }
+      }
+
+      if (preg_match('/geo:\\s*(-?\\d{1,2}(?:\\.\\d+)?)\\s*,\\s*(-?\\d{1,3}(?:\\.\\d+)?)/i', $source, $matches)) {
+        $point = $this->parseLatLngMatch($matches[1], $matches[2]);
+        if ($point) {
+          return $point;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private function parseLatLngMatch($latRaw, $lngRaw) {
+    $lat = (float)$latRaw;
+    $lng = (float)$lngRaw;
+    if (!is_finite($lat) || !is_finite($lng)) {
+      return null;
+    }
+    if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
+      return null;
+    }
+    return ['lat' => $lat, 'lng' => $lng];
+  }
+
+  private function haversineKm($lat1, $lng1, $lat2, $lng2) {
+    $earthRadiusKm = 6371.0;
+    $toRad = function ($deg) {
+      return $deg * M_PI / 180.0;
+    };
+
+    $dLat = $toRad($lat2 - $lat1);
+    $dLng = $toRad($lng2 - $lng1);
+    $a = sin($dLat / 2) * sin($dLat / 2)
+      + cos($toRad($lat1)) * cos($toRad($lat2)) * sin($dLng / 2) * sin($dLng / 2);
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+    return $earthRadiusKm * $c;
   }
 }

@@ -23,6 +23,11 @@ beforeAll(async () => {
 
   const service = new SalesService(db, {
     defaultShippingVnd: 10000,
+    deliveryShopLat: 10.772081646838936,
+    deliveryShopLng: 106.65817769618629,
+    deliveryBaseEtaMinutes: 20,
+    deliveryPerKmEtaMinutes: 4,
+    deliveryFallbackEtaMinutes: 40,
     adminWhitelistIds: ["999999"],
     adminPassphraseHash: hash,
   });
