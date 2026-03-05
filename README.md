@@ -119,6 +119,16 @@ Observability alert check (5-minute window by default):
   - `MAX_WEBHOOK_SEND_FAIL_RATE` (default `3`)
   - `MAX_DB_ERROR_RATE` (default `1`)
 
+Install cron (every 10 minutes) for continuous check:
+
+```bash
+chmod +x scripts/install-sre-cron.sh
+./scripts/install-sre-cron.sh install
+```
+
+Runbook:
+- `docs/ops-runbook.md`
+
 Or run manually:
 
 ```bash
