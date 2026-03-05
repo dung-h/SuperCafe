@@ -449,6 +449,10 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
     return { intent: "faq", sku };
   }
 
+  if (containsAny(normalized, ["gio mo cua", "mo cua", "dong cua", "dia chi", "o dau", "hotline", "so dien thoai", "email", "lien he"])) {
+    return { intent: "faq", sku };
+  }
+
   if (containsAny(normalized, [
     "menu",
     "do uong",
@@ -789,6 +793,19 @@ async function handleIntent(
 
   if (classification.intent === "payment_help") {
     const orderCode = classification.orderCode;
+    const normalizedQuestion = normalizeVietnamese(payload.message);
+    if (!orderCode && containsAny(normalizedQuestion, ["cod", "bank transfer", "chuyen khoan", "thanh toan"])) {
+      return {
+        reply: "Hiện hỗ trợ 2 phương thức thanh toán: bank_transfer (chuyển khoản) và cod (thanh toán khi nhận hàng).",
+        ui: {
+          type: "menu",
+          title: "Phương thức thanh toán",
+          items: [],
+          suggestions: ["Đặt đơn nhanh", "Xem menu", "Gặp tư vấn viên"],
+        },
+      };
+    }
+
     if (!orderCode) {
       return {
         reply: "Bạn gửi mã đơn để mình hướng dẫn thanh toán nhé. Ví dụ: ORD-20260302-0001",

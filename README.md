@@ -129,6 +129,11 @@ chmod +x scripts/install-sre-cron.sh
 Runbook:
 - `docs/ops-runbook.md`
 
+Knowledge base cho chatbot:
+- Tài liệu: `docs/lowland-coffee-chatbot-kb.md`
+- Seed FAQ vào DB:
+  - `php LTW251/scripts/seed_chatbot_kb.php`
+
 Or run manually:
 
 ```bash

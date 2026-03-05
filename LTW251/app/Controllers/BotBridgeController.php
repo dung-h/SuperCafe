@@ -270,6 +270,16 @@ class BotBridgeController extends BaseController {
     }
 
     $pdo = DB::pdo();
+    $normalizedQuestion = $this->normalizeText($question);
+    $contactAnswer = $this->resolveContactAnswer($pdo, $normalizedQuestion);
+    if ($contactAnswer) {
+      $this->jsonResponse(200, [
+        'ok' => true,
+        'data' => $contactAnswer
+      ]);
+      return '';
+    }
+
     if ($productSku !== '') {
       $stmt = $pdo->prepare("SELECT name, short_desc, description FROM products WHERE sku = ? LIMIT 1");
       $stmt->execute([$productSku]);
@@ -292,10 +302,15 @@ class BotBridgeController extends BaseController {
       }
     }
 
+    $faq = null;
     $stmtFaq = $pdo->prepare("SELECT question, answer FROM faqs WHERE is_public = 1 AND (question LIKE ? OR answer LIKE ?) ORDER BY position ASC, id DESC LIMIT 1");
     $like = '%' . $question . '%';
     $stmtFaq->execute([$like, $like]);
     $faq = $stmtFaq->fetch();
+
+    if (!$faq) {
+      $faq = $this->findBestFaqByKeyword($pdo, $normalizedQuestion);
+    }
 
     if ($faq) {
       $this->jsonResponse(200, [
@@ -310,6 +325,155 @@ class BotBridgeController extends BaseController {
 
     $this->jsonResponse(200, ['ok' => true, 'data' => null]);
     return '';
+  }
+
+  private function resolveContactAnswer($pdo, $normalizedQuestion) {
+    if ($normalizedQuestion === '') {
+      return null;
+    }
+
+    $stmt = $pdo->prepare("SELECT address, phone, email, opening_hours FROM contact_settings WHERE id = 1 LIMIT 1");
+    $stmt->execute();
+    $contact = $stmt->fetch();
+    if (!$contact) {
+      return null;
+    }
+
+    $address = trim((string)($contact['address'] ?? ''));
+    $phone = trim((string)($contact['phone'] ?? ''));
+    $email = trim((string)($contact['email'] ?? ''));
+    $hours = trim((string)($contact['opening_hours'] ?? ''));
+
+    if ($this->containsAnyTerm($normalizedQuestion, ['gio mo cua', 'mo cua', 'dong cua', 'thoi gian mo cua', 'opening hour'])) {
+      return [
+        'answer' => $hours !== '' ? ('Giờ mở cửa hiện tại: ' . $hours . '.') : 'Hiện chưa có thông tin giờ mở cửa cụ thể.',
+        'sourceQuestion' => 'Thong tin gio mo cua cua quan'
+      ];
+    }
+
+    if ($this->containsAnyTerm($normalizedQuestion, ['dia chi', 'o dau', 'vi tri', 'duong nao'])) {
+      return [
+        'answer' => $address !== '' ? ('Địa chỉ quán: ' . $address . '.') : 'Hiện chưa có thông tin địa chỉ.',
+        'sourceQuestion' => 'Thong tin dia chi cua quan'
+      ];
+    }
+
+    if ($this->containsAnyTerm($normalizedQuestion, ['so dien thoai', 'sdt', 'hotline', 'phone'])) {
+      return [
+        'answer' => $phone !== '' ? ('Số điện thoại liên hệ: ' . $phone . '.') : 'Hiện chưa có số điện thoại liên hệ.',
+        'sourceQuestion' => 'Thong tin so dien thoai cua quan'
+      ];
+    }
+
+    if ($this->containsAnyTerm($normalizedQuestion, ['email'])) {
+      return [
+        'answer' => $email !== '' ? ('Email liên hệ: ' . $email . '.') : 'Hiện chưa có email liên hệ.',
+        'sourceQuestion' => 'Thong tin email cua quan'
+      ];
+    }
+
+    if ($this->containsAnyTerm($normalizedQuestion, ['lien he', 'contact', 'hotline'])) {
+      return [
+        'answer' => 'Thông tin liên hệ của quán:' .
+          ($address !== '' ? ("\n- Địa chỉ: " . $address) : '') .
+          ($phone !== '' ? ("\n- Điện thoại: " . $phone) : '') .
+          ($email !== '' ? ("\n- Email: " . $email) : '') .
+          ($hours !== '' ? ("\n- Giờ mở cửa: " . $hours) : ''),
+        'sourceQuestion' => 'Thong tin lien he cua quan'
+      ];
+    }
+
+    return null;
+  }
+
+  private function findBestFaqByKeyword($pdo, $normalizedQuestion) {
+    $tokens = $this->extractMeaningfulTokens($normalizedQuestion);
+    if (empty($tokens)) {
+      return null;
+    }
+
+    $stmt = $pdo->prepare("SELECT question, answer FROM faqs WHERE is_public = 1 ORDER BY position ASC, id DESC LIMIT 250");
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+    if (!is_array($rows) || empty($rows)) {
+      return null;
+    }
+
+    $bestScore = 0;
+    $bestRow = null;
+    foreach ($rows as $row) {
+      $questionNorm = $this->normalizeText((string)($row['question'] ?? ''));
+      $answerNorm = $this->normalizeText((string)($row['answer'] ?? ''));
+      $haystack = $questionNorm . ' ' . $answerNorm;
+      $score = 0;
+      foreach ($tokens as $token) {
+        if ($token === '') {
+          continue;
+        }
+        if (preg_match('/(?:^|\s)' . preg_quote($token, '/') . '(?:$|\s)/', $questionNorm)) {
+          $score += 3;
+          continue;
+        }
+        if (preg_match('/(?:^|\s)' . preg_quote($token, '/') . '(?:$|\s)/', $answerNorm)) {
+          $score += 2;
+          continue;
+        }
+        if (strpos($haystack, $token) !== false) {
+          $score += 1;
+        }
+      }
+
+      if ($score > $bestScore) {
+        $bestScore = $score;
+        $bestRow = $row;
+      }
+    }
+
+    return $bestScore > 0 ? $bestRow : null;
+  }
+
+  private function normalizeText($text) {
+    $lower = mb_strtolower((string)$text, 'UTF-8');
+    $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $lower);
+    $normalized = $ascii !== false ? strtolower((string)$ascii) : strtolower((string)$lower);
+    $normalized = preg_replace('/[^a-z0-9\\s]/', ' ', $normalized);
+    $normalized = preg_replace('/\\s+/', ' ', trim((string)$normalized));
+    return $normalized;
+  }
+
+  private function containsAnyTerm($source, $terms) {
+    foreach ($terms as $term) {
+      $termNorm = $this->normalizeText((string)$term);
+      if ($termNorm !== '' && strpos((string)$source, $termNorm) !== false) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private function extractMeaningfulTokens($normalizedQuestion) {
+    $stopWords = [
+      'la', 'co', 'cho', 'minh', 'toi', 'shop', 'quan', 'bot', 'va', 'voi', 'nhu', 'the', 'nao',
+      'gi', 'khong', 'duoc', 'khach', 'nhe', 'nha', 'oi', 'a', 'e', 'em', 'anh', 'chi',
+      'mot', 'hai', 'ba', 'bon', 'tu', 'nam', 'sau', 'bay', 'tam', 'chin', 'muoi'
+    ];
+    $stopSet = array_flip($stopWords);
+    $parts = preg_split('/\\s+/', (string)$normalizedQuestion);
+    if (!is_array($parts)) {
+      return [];
+    }
+    $tokens = [];
+    foreach ($parts as $part) {
+      $token = trim((string)$part);
+      if ($token === '' || strlen($token) < 3) {
+        continue;
+      }
+      if (isset($stopSet[$token])) {
+        continue;
+      }
+      $tokens[] = $token;
+    }
+    return array_values(array_unique($tokens));
   }
 
   private function readJsonBody() {
