@@ -139,6 +139,17 @@ export function initDatabase(sqlitePath: string): Database.Database {
       FOREIGN KEY (order_code) REFERENCES orders(order_code)
     );
 
+    CREATE TABLE IF NOT EXISTS order_idempotency (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      customer_telegram_id TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      order_code TEXT,
+      response_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS admin_users (
       telegram_id TEXT PRIMARY KEY,
       display_name TEXT,
@@ -168,6 +179,8 @@ export function initDatabase(sqlitePath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_orders_customer_telegram_id ON orders(customer_telegram_id);
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     CREATE INDEX IF NOT EXISTS idx_payments_order_code ON payments(order_code);
+    CREATE INDEX IF NOT EXISTS idx_order_idempotency_key ON order_idempotency(idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_order_idempotency_order_code ON order_idempotency(order_code);
     CREATE INDEX IF NOT EXISTS idx_faq_entries_product_sku ON faq_entries(product_sku);
   `);
 

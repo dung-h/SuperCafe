@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SalesBackend } from "../backends";
 import type { OpenClawConfig } from "../config";
 import { extractOrderCode, inferActionFromText, isValidPhone, parseActionPayload } from "./actionParser";
@@ -254,6 +255,7 @@ export class DialoguePolicyEngine {
     }
 
     if (action?.type === "ACTION_ORDER_START") {
+      resetOrderFlowContext(context, input);
       state = "ORDER_COLLECT_ITEMS";
       return buildExecution(
         state,
@@ -297,6 +299,7 @@ export class DialoguePolicyEngine {
       }
 
       if (action?.type === "ACTION_ORDER_ADD" || action?.type === "ACTION_ORDER_SET_QTY") {
+        ensureOrderFlowId(context, input);
         delete context.pendingOrderSuggestion;
         state = "ORDER_COLLECT_ITEMS";
         const lines = context.order.items.map((item) => `- ${item.sku} x${item.qty}`);
@@ -313,6 +316,7 @@ export class DialoguePolicyEngine {
       if (state === "ORDER_COLLECT_ITEMS" && !action) {
         const parsedItems = parseItemListFromText(input.message);
         if (parsedItems.length) {
+          ensureOrderFlowId(context, input);
           delete context.pendingOrderSuggestion;
           for (const item of parsedItems) {
             upsertOrderItem(context, item.sku, item.qty);
@@ -409,6 +413,8 @@ export class DialoguePolicyEngine {
           return buildExecution(state, context, `Mình còn thiếu ${fieldLabel(missing[0])}. Bạn bổ sung giúp mình nhé.`, menuForState(state, context), toolCalls, "order_confirm_missing");
         }
 
+        ensureOrderFlowId(context, input);
+        const idempotencyKey = buildOrderIdempotencyKey(input, context.order);
         toolCalls.push("order_create");
         const created = await this.backend.postTool<any>(
           "order_create",
@@ -421,6 +427,7 @@ export class DialoguePolicyEngine {
             },
             items: context.order.items,
             payment_method: context.order.paymentMethod,
+            idempotency_key: idempotencyKey,
           },
           input.correlationId,
         );
@@ -539,6 +546,59 @@ function sanitizeContext(
   }
 
   return output;
+}
+
+function resetOrderFlowContext(context: DialogueSessionContext, input: PolicyInput): void {
+  const nextOrder: DialogueOrderContext = {
+    items: [],
+    flowId: createOrderFlowId(input),
+  };
+  if (context.order.name) {
+    nextOrder.name = context.order.name;
+  }
+  if (context.order.phone) {
+    nextOrder.phone = context.order.phone;
+  }
+  if (context.order.address) {
+    nextOrder.address = context.order.address;
+  }
+  context.order = nextOrder;
+  delete context.pendingOrderSuggestion;
+}
+
+function ensureOrderFlowId(context: DialogueSessionContext, input: PolicyInput): string {
+  if (!context.order.flowId) {
+    context.order.flowId = createOrderFlowId(input);
+  }
+  return context.order.flowId;
+}
+
+function createOrderFlowId(input: PolicyInput): string {
+  const seed = `${input.channel}|${input.userId}|${input.correlationId}|${Date.now()}`;
+  return `flow-${createHash("sha1").update(seed).digest("hex").slice(0, 16)}`;
+}
+
+function buildOrderIdempotencyKey(input: PolicyInput, order: DialogueOrderContext): string {
+  const normalizedItems = [...order.items]
+    .map((item) => ({
+      sku: String(item.sku || "").trim().toUpperCase(),
+      qty: Number(item.qty || 0),
+    }))
+    .filter((item) => item.sku && Number.isInteger(item.qty) && item.qty > 0)
+    .sort((a, b) => (a.sku === b.sku ? a.qty - b.qty : a.sku.localeCompare(b.sku)));
+
+  const canonical = JSON.stringify({
+    flowId: order.flowId || "flow-missing",
+    channel: input.channel,
+    userId: input.userId,
+    customerName: order.name || "",
+    customerPhone: order.phone || "",
+    customerAddress: order.address || "",
+    paymentMethod: order.paymentMethod || "",
+    items: normalizedItems,
+  });
+
+  return `ocv1:${createHash("sha256").update(canonical).digest("hex").slice(0, 64)}`;
 }
 
 function parseItemListFromText(input: string): Array<{ sku: string; qty: number }> {

@@ -225,6 +225,20 @@ CREATE TABLE IF NOT EXISTS bot_orders (
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS bot_order_idempotency (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  idempotency_key VARCHAR(96) NOT NULL UNIQUE,
+  chat_user_id VARCHAR(100) NOT NULL,
+  request_hash CHAR(64) NOT NULL,
+  order_code VARCHAR(32) NULL,
+  response_json LONGTEXT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_bot_order_idempotency_user (chat_user_id),
+  INDEX idx_bot_order_idempotency_created (created_at),
+  INDEX idx_bot_order_idempotency_order_code (order_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS messenger_webhook_events (
   event_id VARCHAR(191) NOT NULL PRIMARY KEY,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -118,6 +118,7 @@ class BotBridgeController extends BaseController {
     $itemsInput = is_array($payload['items'] ?? null) ? $payload['items'] : [];
     $paymentMethod = strtolower(trim((string)($payload['payment_method'] ?? 'bank_transfer')));
     $note = trim((string)($payload['note'] ?? ''));
+    $rawIdempotencyKey = trim((string)($payload['idempotency_key'] ?? ''));
 
     $customerTelegramId = trim((string)($customer['telegramId'] ?? ''));
     $customerName = trim((string)($customer['name'] ?? ''));
@@ -133,6 +134,16 @@ class BotBridgeController extends BaseController {
       $paymentMethod = 'bank_transfer';
     }
 
+    $idempotencyKey = $this->sanitizeIdempotencyKey($rawIdempotencyKey);
+    if ($rawIdempotencyKey !== '' && $idempotencyKey === '') {
+      $this->jsonResponse(400, ['ok' => false, 'error' => 'Invalid idempotency_key']);
+      return '';
+    }
+
+    $requestHash = $idempotencyKey !== ''
+      ? $this->buildOrderRequestHash($customerTelegramId, $customerName, $customerPhone, $customerAddress, $itemsInput, $paymentMethod, $note)
+      : '';
+
     if (empty($itemsInput)) {
       $this->jsonResponse(400, ['ok' => false, 'error' => 'Order must contain at least one item']);
       return '';
@@ -141,6 +152,36 @@ class BotBridgeController extends BaseController {
     $pdo = DB::pdo();
     try {
       $pdo->beginTransaction();
+
+      if ($idempotencyKey !== '') {
+        $stmt = $pdo->prepare("SELECT idempotency_key, request_hash, order_code FROM bot_order_idempotency WHERE idempotency_key = ? LIMIT 1 FOR UPDATE");
+        $stmt->execute([$idempotencyKey]);
+        $locked = $stmt->fetch();
+
+        if ($locked) {
+          $existingHash = trim((string)($locked['request_hash'] ?? ''));
+          if ($existingHash !== '' && !hash_equals($existingHash, $requestHash)) {
+            $pdo->rollBack();
+            $this->jsonResponse(409, ['ok' => false, 'error' => 'Idempotency key conflict']);
+            return '';
+          }
+
+          $existingOrderCode = strtoupper(trim((string)($locked['order_code'] ?? '')));
+          if ($existingOrderCode !== '') {
+            $existingOrder = $this->getBotOrderByCode($pdo, $existingOrderCode);
+            $pdo->commit();
+            $this->jsonResponse(200, ['ok' => true, 'data' => $existingOrder]);
+            return '';
+          }
+        } else {
+          $stmt = $pdo->prepare("
+            INSERT INTO bot_order_idempotency (idempotency_key, chat_user_id, request_hash, order_code, response_json)
+            VALUES (?, ?, ?, NULL, NULL)
+          ");
+          $stmt->execute([$idempotencyKey, $customerTelegramId, $requestHash]);
+        }
+      }
+
       $orderCode = $this->nextOrderCode($pdo);
       $subtotal = 0;
       $shipping = 0;
@@ -223,6 +264,20 @@ class BotBridgeController extends BaseController {
         ($note !== '' ? $note : null),
         $botStatus
       ]);
+
+      if ($idempotencyKey !== '') {
+        $orderForReplay = $this->getBotOrderByCode($pdo, $orderCode);
+        $stmt = $pdo->prepare("
+          UPDATE bot_order_idempotency
+          SET order_code = ?, response_json = ?, updated_at = NOW()
+          WHERE idempotency_key = ?
+        ");
+        $stmt->execute([
+          $orderCode,
+          $orderForReplay ? json_encode($orderForReplay, JSON_UNESCAPED_UNICODE) : null,
+          $idempotencyKey,
+        ]);
+      }
 
       $pdo->commit();
 
@@ -587,6 +642,52 @@ class BotBridgeController extends BaseController {
     // Bot order flow currently does not collect customer email.
     // Keep this blank instead of generating synthetic guest emails.
     return '';
+  }
+
+  private function sanitizeIdempotencyKey($value) {
+    $normalized = trim((string)$value);
+    if ($normalized === '') {
+      return '';
+    }
+    if (strlen($normalized) > 96) {
+      return '';
+    }
+    if (!preg_match('/^[A-Za-z0-9:_\\-\\.]+$/', $normalized)) {
+      return '';
+    }
+    return $normalized;
+  }
+
+  private function buildOrderRequestHash($customerTelegramId, $customerName, $customerPhone, $customerAddress, $itemsInput, $paymentMethod, $note) {
+    $normalizedItems = [];
+    foreach ((array)$itemsInput as $item) {
+      $sku = strtoupper(trim((string)($item['sku'] ?? '')));
+      $qty = (int)($item['qty'] ?? 0);
+      if ($sku === '' || $qty <= 0) {
+        continue;
+      }
+      $normalizedItems[] = [
+        'sku' => $sku,
+        'qty' => $qty
+      ];
+    }
+    usort($normalizedItems, function ($a, $b) {
+      if ($a['sku'] === $b['sku']) {
+        return $a['qty'] <=> $b['qty'];
+      }
+      return strcmp((string)$a['sku'], (string)$b['sku']);
+    });
+
+    $payload = [
+      'customerTelegramId' => trim((string)$customerTelegramId),
+      'name' => trim((string)$customerName),
+      'phone' => trim((string)$customerPhone),
+      'address' => trim((string)$customerAddress),
+      'paymentMethod' => trim((string)$paymentMethod),
+      'note' => trim((string)$note),
+      'items' => $normalizedItems
+    ];
+    return hash('sha256', json_encode($payload, JSON_UNESCAPED_UNICODE));
   }
 
   private function getBotOrderByCode($pdo, $orderCode) {

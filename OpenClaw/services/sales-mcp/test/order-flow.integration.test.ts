@@ -99,6 +99,71 @@ describe("sales mcp integration", () => {
     expect(confirm.body.data.status).toBe("paid");
   });
 
+  it("replays same order with identical idempotency_key", async () => {
+    const payload = {
+      customer: {
+        telegramId: "idem-telegram-1",
+        name: "Replay User",
+        phone: "0909222333",
+        address: "HCM",
+      },
+      items: [{ sku: "BAC-XIU-L", qty: 1 }],
+      payment_method: "cod",
+      idempotency_key: "sales-idem-same-001",
+    };
+
+    const first = await request(app)
+      .post("/tools/order_create")
+      .set("x-api-key", API_KEY)
+      .send(payload)
+      .expect(200);
+
+    const second = await request(app)
+      .post("/tools/order_create")
+      .set("x-api-key", API_KEY)
+      .send(payload)
+      .expect(200);
+
+    expect(first.body.ok).toBe(true);
+    expect(second.body.ok).toBe(true);
+    expect(second.body.data.orderCode).toBe(first.body.data.orderCode);
+  });
+
+  it("rejects idempotency_key conflict when payload differs", async () => {
+    const key = "sales-idem-conflict-001";
+    const payload1 = {
+      customer: {
+        telegramId: "idem-telegram-2",
+        name: "Conflict User",
+        phone: "0909555666",
+        address: "Can Tho",
+      },
+      items: [{ sku: "BAC-XIU-L", qty: 1 }],
+      payment_method: "cod",
+      idempotency_key: key,
+    };
+
+    const payload2 = {
+      ...payload1,
+      items: [{ sku: "BAC-XIU-L", qty: 2 }],
+    };
+
+    await request(app)
+      .post("/tools/order_create")
+      .set("x-api-key", API_KEY)
+      .send(payload1)
+      .expect(200);
+
+    const conflict = await request(app)
+      .post("/tools/order_create")
+      .set("x-api-key", API_KEY)
+      .send(payload2)
+      .expect(409);
+
+    expect(conflict.body.ok).toBe(false);
+    expect(String(conflict.body.error || "")).toContain("Idempotency key conflict");
+  });
+
   it("reuses pending payment when customer resubmits transfer info", async () => {
     const create = await request(app)
       .post("/tools/order_create")

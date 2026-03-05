@@ -69,6 +69,13 @@ class MessengerController extends BaseController {
           continue;
         }
 
+        $rateLimit = $this->isSenderRateLimited($senderId);
+        if (!empty($rateLimit['limited'])) {
+          $ignored++;
+          error_log('[messenger] sender rate limited sender=' . $senderId . ' retryAfter=' . (string)($rateLimit['retryAfterSec'] ?? 0));
+          continue;
+        }
+
         if (!empty($event['message']['is_echo'])) {
           $ignored++;
           continue;
@@ -224,6 +231,35 @@ class MessengerController extends BaseController {
       $pdo->exec("DELETE FROM messenger_webhook_events WHERE created_at < (NOW() - INTERVAL 2 DAY)");
     } catch (Throwable $e) {
       error_log('[messenger] dedupe cleanup failed: ' . (string)$e->getMessage());
+    }
+  }
+
+  private function isSenderRateLimited($senderId) {
+    $windowSec = max(1, (int)MESSENGER_WEBHOOK_RATE_LIMIT_WINDOW_SEC);
+    $maxRequests = max(1, (int)MESSENGER_WEBHOOK_RATE_LIMIT_MAX);
+    $key = 'messenger:webhook:rl:' . sha1((string)$senderId);
+
+    try {
+      $redis = new \Predis\Client([
+        'scheme' => 'tcp',
+        'host' => REDIS_HOST,
+        'port' => REDIS_PORT,
+        'read_write_timeout' => 1,
+      ]);
+      $count = (int)$redis->incr($key);
+      if ($count === 1) {
+        $redis->expire($key, $windowSec);
+      }
+
+      if ($count <= $maxRequests) {
+        return ['limited' => false, 'retryAfterSec' => 0];
+      }
+
+      $ttl = (int)$redis->ttl($key);
+      return ['limited' => true, 'retryAfterSec' => max(1, $ttl)];
+    } catch (\Throwable $e) {
+      error_log('[messenger] rate limiter unavailable: ' . $e->getMessage());
+      return ['limited' => false, 'retryAfterSec' => 0];
     }
   }
 

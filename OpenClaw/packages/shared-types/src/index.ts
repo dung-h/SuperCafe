@@ -69,6 +69,7 @@ export interface CreateOrderInput {
   items: Array<{ sku: string; qty: number }>;
   payment_method: PaymentMethod;
   note?: string;
+  idempotency_key?: string;
 }
 
 export interface CatalogListInput {

@@ -54,6 +54,7 @@ export type ChatUi = {
 };
 
 export type DialogueOrderContext = {
+  flowId?: string;
   items: Array<{
     sku: string;
     qty: number;

@@ -10,6 +10,11 @@ MIN_ORDER_COMPLETION_RATE="${MIN_ORDER_COMPLETION_RATE:-55}"
 MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT="${MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT:-5}"
 MAX_WEBHOOK_SEND_FAIL_RATE="${MAX_WEBHOOK_SEND_FAIL_RATE:-3}"
 MAX_DB_ERROR_RATE="${MAX_DB_ERROR_RATE:-1}"
+ALERT_NOTIFY_MODE="${ALERT_NOTIFY_MODE:-fail_only}"
+ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
+ALERT_TELEGRAM_BOT_TOKEN="${ALERT_TELEGRAM_BOT_TOKEN:-}"
+ALERT_TELEGRAM_CHAT_ID="${ALERT_TELEGRAM_CHAT_ID:-}"
+ALERT_TITLE="${ALERT_TITLE:-SuperCafe KPI Alert}"
 
 float_gt() {
   awk -v left="$1" -v right="$2" 'BEGIN { exit !(left > right) }'
@@ -20,6 +25,7 @@ float_lt() {
 }
 
 failures=0
+declare -a FAIL_MESSAGES=()
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -31,6 +37,30 @@ require_cmd() {
 require_cmd curl
 require_cmd jq
 require_cmd docker
+
+add_failure() {
+  local message="$1"
+  echo "[alert] FAIL: ${message}" >&2
+  FAIL_MESSAGES+=("${message}")
+  failures=$((failures + 1))
+}
+
+send_notifications() {
+  local text="$1"
+  if [ -n "${ALERT_TELEGRAM_BOT_TOKEN}" ] && [ -n "${ALERT_TELEGRAM_CHAT_ID}" ]; then
+    curl -fsS -X POST "https://api.telegram.org/bot${ALERT_TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=${ALERT_TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=${text}" >/dev/null || echo "[alert] WARN: telegram notify failed" >&2
+  fi
+
+  if [ -n "${ALERT_WEBHOOK_URL}" ]; then
+    local payload
+    payload="$(printf '%s' "${text}" | jq -Rs '{text: .}')"
+    curl -fsS -X POST "${ALERT_WEBHOOK_URL}" \
+      -H 'Content-Type: application/json' \
+      -d "${payload}" >/dev/null || echo "[alert] WARN: webhook notify failed" >&2
+  fi
+}
 
 echo "[alert] window=${WINDOW_MINUTES}m openclaw=${OPENCLAW_URL}"
 
@@ -56,19 +86,16 @@ order_start_count="$(printf '%s' "${kpi_raw}" | jq -r '.data.overall.counters.or
 echo "[alert] KPI totalBotEvents=${overall_total} fallbackRate=${fallback_rate}% actionErrorRate=${action_error_rate}% orderCompletion=${order_completion_rate}%"
 
 if float_gt "${fallback_rate}" "${MAX_FALLBACK_RATE}"; then
-  echo "[alert] FAIL: fallback_rate ${fallback_rate}% > ${MAX_FALLBACK_RATE}%" >&2
-  failures=$((failures + 1))
+  add_failure "fallback_rate ${fallback_rate}% > ${MAX_FALLBACK_RATE}%"
 fi
 
 if float_gt "${action_error_rate}" "${MAX_ACTION_ERROR_RATE}"; then
-  echo "[alert] FAIL: action_error_rate ${action_error_rate}% > ${MAX_ACTION_ERROR_RATE}%" >&2
-  failures=$((failures + 1))
+  add_failure "action_error_rate ${action_error_rate}% > ${MAX_ACTION_ERROR_RATE}%"
 fi
 
 if [ "${order_start_count}" -ge "${MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT}" ]; then
   if float_lt "${order_completion_rate}" "${MIN_ORDER_COMPLETION_RATE}"; then
-    echo "[alert] FAIL: order_completion_rate ${order_completion_rate}% < ${MIN_ORDER_COMPLETION_RATE}% (orderStartCount=${order_start_count})" >&2
-    failures=$((failures + 1))
+    add_failure "order_completion_rate ${order_completion_rate}% < ${MIN_ORDER_COMPLETION_RATE}% (orderStartCount=${order_start_count})"
   fi
 else
   echo "[alert] SKIP: order_completion_rate check requires orderStartCount >= ${MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT} (current=${order_start_count})"
@@ -99,8 +126,7 @@ fi
 echo "[alert] webhook processed=${processed_sum} sendFailed=${send_failed_sum} sendFailRate=${webhook_send_fail_rate}%"
 
 if [ "${processed_sum}" -gt 0 ] && float_gt "${webhook_send_fail_rate}" "${MAX_WEBHOOK_SEND_FAIL_RATE}"; then
-  echo "[alert] FAIL: webhook send_fail_rate ${webhook_send_fail_rate}% > ${MAX_WEBHOOK_SEND_FAIL_RATE}%" >&2
-  failures=$((failures + 1))
+  add_failure "webhook send_fail_rate ${webhook_send_fail_rate}% > ${MAX_WEBHOOK_SEND_FAIL_RATE}%"
 fi
 
 db_error_count="$(docker logs --since "${WINDOW_MINUTES}m" openclaw_agent 2>&1 | awk '/failed to write chat_dialogue_events|dialogue session cleanup failed|dialogue engine v2 failed; fallback to legacy/ { c++ } END { printf "%d", c + 0 }')"
@@ -116,8 +142,52 @@ fi
 
 echo "[alert] dbErrors=${db_error_count} dbErrorRate=${db_error_rate}%"
 if float_gt "${db_error_rate}" "${MAX_DB_ERROR_RATE}"; then
-  echo "[alert] FAIL: db_error_rate ${db_error_rate}% > ${MAX_DB_ERROR_RATE}%" >&2
-  failures=$((failures + 1))
+  add_failure "db_error_rate ${db_error_rate}% > ${MAX_DB_ERROR_RATE}%"
+fi
+
+summary_lines=(
+  "${ALERT_TITLE}"
+  "window=${WINDOW_MINUTES}m"
+  "fallbackRate=${fallback_rate}%"
+  "actionErrorRate=${action_error_rate}%"
+  "orderCompletion=${order_completion_rate}%"
+  "webhookSendFailRate=${webhook_send_fail_rate}%"
+  "dbErrorRate=${db_error_rate}%"
+)
+
+if [ "${failures}" -gt 0 ]; then
+  summary_lines+=("status=FAILED count=${failures}")
+  for message in "${FAIL_MESSAGES[@]}"; do
+    summary_lines+=("- ${message}")
+  done
+else
+  summary_lines+=("status=OK")
+fi
+summary_text="$(printf '%s\n' "${summary_lines[@]}")"
+
+should_notify="0"
+case "${ALERT_NOTIFY_MODE}" in
+  off)
+    should_notify="0"
+    ;;
+  always)
+    should_notify="1"
+    ;;
+  fail_only)
+    if [ "${failures}" -gt 0 ]; then
+      should_notify="1"
+    fi
+    ;;
+  *)
+    echo "[alert] WARN: unknown ALERT_NOTIFY_MODE=${ALERT_NOTIFY_MODE}, fallback to fail_only" >&2
+    if [ "${failures}" -gt 0 ]; then
+      should_notify="1"
+    fi
+    ;;
+esac
+
+if [ "${should_notify}" = "1" ]; then
+  send_notifications "${summary_text}"
 fi
 
 if [ "${failures}" -gt 0 ]; then

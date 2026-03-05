@@ -33,6 +33,8 @@ Background:
      - `EXTERNAL_SESSION_TTL_SEC` (default `86400`)
      - `DIALOG_ENGINE_V2_ENABLED=true|false` (default `false`, rollout safe)
      - `DIALOG_SESSION_TTL_HOURS` (default `24`)
+     - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`, `OPENCLAW_CHAT_RATE_LIMIT_MAX`
+     - `MESSENGER_WEBHOOK_RATE_LIMIT_MAX`, `MESSENGER_WEBHOOK_RATE_LIMIT_WINDOW_SEC`
      - `DB_NAME` (production DB name; fallback now supports both `lowland_coffee` and `lowland_db`)
    - Edit `OpenClaw/infra/env/.env`.
    - Set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
@@ -62,6 +64,8 @@ Stop stack:
   - Response `ui.suggestions` uses object contract: `{ label, payload }`.
   - Session state and event logs persist on MySQL (`chat_dialogue_sessions`, `chat_dialogue_events`).
   - Rollback by setting `DIALOG_ENGINE_V2_ENABLED=false`.
+- Backlog 4 tuần đầu:
+  - `docs/industrial-lite-v1-backlog-weeks-1-4.md`
 
 ## Messenger webhook
 
@@ -118,6 +122,10 @@ Observability alert check (5-minute window by default):
 - Delivery thresholds:
   - `MAX_WEBHOOK_SEND_FAIL_RATE` (default `3`)
   - `MAX_DB_ERROR_RATE` (default `1`)
+- Optional alert notify:
+  - `ALERT_NOTIFY_MODE=off|fail_only|always`
+  - `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID`
+  - `ALERT_WEBHOOK_URL`
 
 Install cron (every 10 minutes) for continuous check:
 

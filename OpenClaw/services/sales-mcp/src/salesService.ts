@@ -1,5 +1,5 @@
 ﻿import argon2 from "argon2";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type Database from "better-sqlite3";
 import type {
   CreateOrderInput,
@@ -62,6 +62,17 @@ type FaqRow = {
   question: string;
   answer: string;
   tags_json: string;
+};
+
+type IdempotencyRow = {
+  id: string;
+  idempotency_key: string;
+  customer_telegram_id: string;
+  request_hash: string;
+  order_code: string | null;
+  response_json: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export class SalesService {
@@ -290,8 +301,38 @@ export class SalesService {
       throw new Error("Order must contain at least one item");
     }
 
-    const tx = this.db.transaction((payload: CreateOrderInput) => {
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotency_key);
+    if (input.idempotency_key && !idempotencyKey) {
+      throw new Error("Invalid idempotency key");
+    }
+    const requestHash = idempotencyKey ? buildOrderRequestHash(input) : "";
+
+    const tx = this.db.transaction((payload: CreateOrderInput, idemKey: string | undefined, idemRequestHash: string) => {
       const now = nowIso();
+
+      if (idemKey) {
+        const existing = this.db
+          .prepare(`SELECT * FROM order_idempotency WHERE idempotency_key = ? LIMIT 1`)
+          .get(idemKey) as IdempotencyRow | undefined;
+
+        if (existing) {
+          if (existing.request_hash !== idemRequestHash) {
+            throw new Error("Idempotency key conflict");
+          }
+          if (existing.order_code) {
+            return existing.order_code;
+          }
+        } else {
+          this.db
+            .prepare(
+              `INSERT INTO order_idempotency (
+                 id, idempotency_key, customer_telegram_id, request_hash, order_code, response_json, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)`,
+            )
+            .run(createId("idem"), idemKey, payload.customer.telegramId, idemRequestHash, now, now);
+        }
+      }
+
       const datePart = now.slice(0, 10).replace(/-/g, "");
       const prefix = `ORD-${datePart}-`;
       const count = (this.db
@@ -334,6 +375,7 @@ export class SalesService {
       const shipping = this.config.defaultShippingVnd;
       const total = subtotal + shipping;
       const orderStatus: OrderStatus = payload.payment_method === "bank_transfer" ? "awaiting_payment" : "new";
+      const orderId = createId("ord");
 
       this.db
         .prepare(
@@ -346,7 +388,7 @@ export class SalesService {
       `,
         )
         .run(
-          createId("ord"),
+          orderId,
           orderCode,
           payload.customer.telegramId,
           payload.customer.name,
@@ -363,10 +405,39 @@ export class SalesService {
           now,
         );
 
+      if (idemKey) {
+        const snapshot: Order = {
+          id: orderId,
+          orderCode,
+          customerTelegramId: payload.customer.telegramId,
+          customerName: payload.customer.name,
+          customerPhone: payload.customer.phone,
+          customerAddress: payload.customer.address,
+          items,
+          subtotalVnd: subtotal,
+          shippingVnd: shipping,
+          totalVnd: total,
+          paymentMethod: payload.payment_method,
+          paymentRef: undefined,
+          note: payload.note ?? undefined,
+          status: orderStatus,
+          stockReleased: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.db
+          .prepare(
+            `UPDATE order_idempotency
+             SET order_code = ?, response_json = ?, updated_at = ?
+             WHERE idempotency_key = ?`,
+          )
+          .run(orderCode, JSON.stringify(snapshot), now, idemKey);
+      }
+
       return orderCode;
     });
 
-    const code = tx(input);
+    const code = tx(input, idempotencyKey || undefined, requestHash);
     return this.getOrderByCode(code) as Order;
   }
 
@@ -752,6 +823,44 @@ function normalizeText(value: string): string {
     .trim();
 }
 
+function normalizeIdempotencyKey(value?: string): string {
+  if (!value) {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.length > 96) {
+    return "";
+  }
+  if (!/^[A-Za-z0-9:_\-.]+$/.test(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
+function buildOrderRequestHash(input: CreateOrderInput): string {
+  const canonical = {
+    customer: {
+      telegramId: String(input.customer.telegramId || "").trim(),
+      name: String(input.customer.name || "").trim(),
+      phone: String(input.customer.phone || "").trim(),
+      address: String(input.customer.address || "").trim(),
+    },
+    payment_method: input.payment_method,
+    note: input.note ? String(input.note).trim() : "",
+    items: [...input.items]
+      .map((item) => ({
+        sku: String(item.sku || "").trim().toUpperCase(),
+        qty: Number(item.qty || 0),
+      }))
+      .filter((item) => item.sku && Number.isInteger(item.qty) && item.qty > 0)
+      .sort((left, right) => (left.sku === right.sku ? left.qty - right.qty : left.sku.localeCompare(right.sku))),
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
 function overlapScore(a: string, b: string): number {
   if (!a || !b) {
     return 0;
@@ -780,4 +889,3 @@ function safeEquals(a: string, b: string): boolean {
   }
   return timingSafeEqual(left, right);
 }
-

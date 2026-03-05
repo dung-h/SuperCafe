@@ -25,7 +25,11 @@ Security headers for `POST /tools/*` and `POST /admin/*`:
 - `POST /tools/catalog_get`
   - body: `{ sku_or_id: string }`
 - `POST /tools/order_create`
-  - body: `{ customer, items, payment_method, note? }`
+  - body: `{ customer, items, payment_method, note?, idempotency_key? }`
+  - `idempotency_key`:
+    - optional for backward compatibility
+    - if supplied, backend phai replay cung ket qua cho cung key + cung payload
+    - neu key trung nhung payload khac, tra loi loi conflict
 - `POST /tools/order_get`
   - body: `{ order_code: string }`
 - `POST /tools/order_list`
@@ -123,6 +127,11 @@ Base URL: `http://openclaw:8082`
     - `web` (backend bridge URL `WEB_BRIDGE_BASE_URL`)
     - `messenger` (backend bridge URL `WEB_BRIDGE_BASE_URL`)
   - `message` hoac `actionPayload` bat buoc co it nhat 1 truong.
+  - rate limit:
+    - neu vuot nguong, service tra `HTTP 429` + `Retry-After` + `retryAfterSeconds`.
+    - nguong cau hinh qua env:
+      - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`
+      - `OPENCLAW_CHAT_RATE_LIMIT_MAX`
   - response:
     ```json
     {

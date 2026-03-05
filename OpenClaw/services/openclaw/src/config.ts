@@ -27,6 +27,8 @@ const envSchema = z.object({
   OPENCLAW_DB_PASS: z.string().default("Webhk251!"),
   DIALOG_ENGINE_V2_ENABLED: z.string().optional(),
   DIALOG_SESSION_TTL_HOURS: z.coerce.number().default(24),
+  OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC: z.coerce.number().default(30),
+  OPENCLAW_CHAT_RATE_LIMIT_MAX: z.coerce.number().default(30),
 });
 
 export type OpenClawConfig = {
@@ -53,6 +55,8 @@ export type OpenClawConfig = {
   openclawDbPass: string;
   dialogEngineV2Enabled: boolean;
   dialogSessionTtlHours: number;
+  chatRateLimitWindowSec: number;
+  chatRateLimitMax: number;
 };
 
 export function readConfig(): OpenClawConfig {
@@ -81,6 +85,8 @@ export function readConfig(): OpenClawConfig {
     openclawDbPass: env.OPENCLAW_DB_PASS,
     dialogEngineV2Enabled: parseBoolean(env.DIALOG_ENGINE_V2_ENABLED),
     dialogSessionTtlHours: Math.max(1, env.DIALOG_SESSION_TTL_HOURS),
+    chatRateLimitWindowSec: Math.max(5, env.OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC),
+    chatRateLimitMax: Math.max(1, env.OPENCLAW_CHAT_RATE_LIMIT_MAX),
   };
 }
 

@@ -115,6 +115,7 @@ export function createApp(config: OpenClawConfig) {
   const llmHttpClient = new HttpClient(config.llmTimeoutMs);
   const llmClient = new LlmClient(config, llmHttpClient);
   const handoffStore = new HandoffStore();
+  const chatRateLimiter = createFixedWindowLimiter(config.chatRateLimitMax, config.chatRateLimitWindowSec);
   const dialogueStateStore = config.dialogEngineV2Enabled ? new DialogueStateStoreMySql(config) : null;
   const dialogueEventLogger = dialogueStateStore ? new DialogueEventLoggerMySql(dialogueStateStore.getPool()) : null;
 
@@ -158,6 +159,26 @@ export function createApp(config: OpenClawConfig) {
       const channel = payload.channel ?? "telegram";
       const messageText = payload.message.trim();
       const actionPayload = (payload.actionPayload || "").trim() || undefined;
+      const rateKey = `${channel}:${payload.userId}`;
+      const rateLimit = chatRateLimiter.hit(rateKey);
+      if (!rateLimit.allowed) {
+        req.log.warn(
+          {
+            key: rateKey,
+            retryAfterSeconds: rateLimit.retryAfterSec,
+            maxRequests: config.chatRateLimitMax,
+            windowSec: config.chatRateLimitWindowSec,
+          },
+          "chat rate limited",
+        );
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSec));
+        res.status(429).json({
+          ok: false,
+          error: "Too many requests. Please retry later.",
+          retryAfterSeconds: rateLimit.retryAfterSec,
+        });
+        return;
+      }
 
       const backend = buildBackend(channel as BackendChannel, config, toolHttpClient);
       let result: ChatResult | null = null;
@@ -1316,6 +1337,52 @@ function toRatePercent(numerator: number, denominator: number): number {
     return 0;
   }
   return Number(((numerator / denominator) * 100).toFixed(2));
+}
+
+type RateLimitBucket = {
+  count: number;
+  resetAt: number;
+};
+
+type RateLimitResult = {
+  allowed: boolean;
+  retryAfterSec: number;
+};
+
+function createFixedWindowLimiter(maxRequests: number, windowSec: number) {
+  const buckets = new Map<string, RateLimitBucket>();
+  const windowMs = Math.max(1, windowSec) * 1000;
+
+  function cleanup(now: number): void {
+    if (buckets.size < 10_000) {
+      return;
+    }
+    for (const [key, bucket] of buckets.entries()) {
+      if (bucket.resetAt <= now) {
+        buckets.delete(key);
+      }
+    }
+  }
+
+  return {
+    hit(key: string): RateLimitResult {
+      const now = Date.now();
+      cleanup(now);
+      const current = buckets.get(key);
+      if (!current || current.resetAt <= now) {
+        buckets.set(key, { count: 1, resetAt: now + windowMs });
+        return { allowed: true, retryAfterSec: 0 };
+      }
+
+      current.count += 1;
+      if (current.count <= maxRequests) {
+        return { allowed: true, retryAfterSec: 0 };
+      }
+
+      const retryAfterSec = Math.max(1, Math.ceil((current.resetAt - now) / 1000));
+      return { allowed: false, retryAfterSec };
+    },
+  };
 }
 
 function toInt(value: unknown): number {

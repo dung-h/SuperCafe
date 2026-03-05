@@ -34,6 +34,7 @@ const schemas = {
     items: z.array(z.object({ sku: z.string().min(1), qty: z.coerce.number().int().positive() })).min(1),
     payment_method: z.enum(["bank_transfer", "cod"]),
     note: z.string().optional(),
+    idempotency_key: z.string().regex(/^[A-Za-z0-9:_\-.]{1,96}$/).optional(),
   }),
   orderGet: z.object({
     order_code: z.string().regex(/^ORD-\d{8}-\d{4}$/),
@@ -353,9 +354,11 @@ function handleError(res: express.Response, error: unknown): void {
   }
 
   const message = error instanceof Error ? error.message : "Unknown error";
-  const status = /not found|invalid|missing|insufficient|accepting|bank_transfer|payment_review|pending/i.test(message)
-    ? 400
-    : 500;
+  const status = /idempotency key conflict/i.test(message)
+    ? 409
+    : /not found|invalid|missing|insufficient|accepting|bank_transfer|payment_review|pending/i.test(message)
+      ? 400
+      : 500;
   res.status(status).json({ ok: false, error: message });
 }
 
