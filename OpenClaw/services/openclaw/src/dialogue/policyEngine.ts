@@ -1395,6 +1395,7 @@ function buildExecution(
     ui,
     nextState,
     nextContext,
+    confidence: intentConfidenceScore(intent),
     state: {
       name: nextState,
       missingFields: forcedMissingFields ?? getMissingFields(nextContext),
@@ -1402,4 +1403,25 @@ function buildExecution(
     intent,
     toolCalls,
   };
+}
+
+function intentConfidenceScore(intent: string): number {
+  const low: Record<string, number> = {
+    fallback: 0.2,
+    wizard_invalid_input: 0.35,
+    invalid_phone: 0.45,
+    invalid_address: 0.45,
+    order_natural_fuzzy_confirm: 0.55,
+    order_status_missing_code: 0.5,
+  };
+  if (intent in low) {
+    return low[intent];
+  }
+  if (intent.startsWith("order_next_missing_")) {
+    return 0.55;
+  }
+  if (intent.startsWith("order_natural_confirm_")) {
+    return 0.65;
+  }
+  return 0.9;
 }

@@ -113,6 +113,7 @@ export type PolicyResult = {
   reply: string;
   ui?: ChatUi;
   alerts?: string[];
+  confidence?: number;
   state: {
     name: DialogueStateName;
     missingFields: string[];

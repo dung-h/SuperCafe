@@ -8,6 +8,7 @@ import { type ClassifyResult, HttpClient, parseClassifierJson } from "./clients"
 import type { OpenClawConfig } from "./config";
 import { DialogueEventLoggerMySql } from "./dialogue/eventLoggerMySql";
 import { DialoguePolicyEngine } from "./dialogue/policyEngine";
+import { CustomerProfileStoreMySql, type UpsertCustomerProfileInput } from "./dialogue/customerProfileStoreMySql";
 import { DialogueStateStoreMySql } from "./dialogue/stateStoreMySql";
 import type { DialogueEventLog, UiSuggestion } from "./dialogue/types";
 import { HandoffStore } from "./handoffStore";
@@ -35,6 +36,7 @@ type ChatRequest = {
 
 type IntentResult = ClassifyResult & {
   category?: string;
+  confidence?: number;
 };
 
 type MenuUiItem = {
@@ -95,6 +97,11 @@ const kpiSchema = z.object({
   windowMinutes: z.coerce.number().int().min(5).max(7 * 24 * 60).default(60),
 });
 
+const profileQuerySchema = z.object({
+  channel: z.enum(["telegram", "web", "messenger"]),
+  userId: z.string().min(1),
+});
+
 const KPI_ACTION_ERROR_INTENTS = [
   "wizard_invalid_input",
   "invalid_phone",
@@ -118,9 +125,15 @@ export function createApp(config: OpenClawConfig) {
   const chatRateLimiter = createFixedWindowLimiter(config.chatRateLimitMax, config.chatRateLimitWindowSec);
   const dialogueStateStore = config.dialogEngineV2Enabled ? new DialogueStateStoreMySql(config) : null;
   const dialogueEventLogger = dialogueStateStore ? new DialogueEventLoggerMySql(dialogueStateStore.getPool()) : null;
+  const customerProfileStore = dialogueStateStore ? new CustomerProfileStoreMySql(dialogueStateStore.getPool()) : null;
 
   if (dialogueStateStore) {
     dialogueStateStore.startCleanupJob();
+  }
+  if (customerProfileStore) {
+    customerProfileStore.ensureSchema().catch((error) => {
+      logger.error({ error: String(error) }, "customer profile schema ensure failed");
+    });
   }
 
   app.use(express.json({ limit: "1mb" }));
@@ -190,6 +203,7 @@ export function createApp(config: OpenClawConfig) {
             llmClient,
             dialogueStateStore,
             dialogueEventLogger,
+            customerProfileStore,
             backend,
             {
               ...payload,
@@ -244,6 +258,22 @@ export function createApp(config: OpenClawConfig) {
       res.json({ ok: true, data: activeSessions });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  app.get("/admin/profile", async (req, res) => {
+    if (!customerProfileStore) {
+      res.status(503).json({ ok: false, error: "Dialogue engine v2 is disabled" });
+      return;
+    }
+    try {
+      const query = profileQuerySchema.parse(req.query);
+      const profile = await customerProfileStore.getByIdentity(query.channel, query.userId);
+      res.json({ ok: true, data: profile });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      req.log.error({ error: message }, "admin profile fetch failed");
       res.status(500).json({ ok: false, error: message });
     }
   });
@@ -304,6 +334,7 @@ async function handleWithDialogueEngine(
   llmClient: LlmClient,
   stateStore: DialogueStateStoreMySql,
   eventLogger: DialogueEventLoggerMySql,
+  profileStore: CustomerProfileStoreMySql | null,
   backend: ReturnType<typeof buildBackend>,
   payload: ChatRequest & { channel: ChatChannel; correlationId: string },
 ): Promise<ChatResult> {
@@ -340,25 +371,38 @@ async function handleWithDialogueEngine(
   let alerts: ChatResult["alerts"] = result.alerts;
   let ui: ChatResult["ui"] = result.ui;
   let intent = result.intent;
+  let confidence = result.confidence ?? 0.9;
   const toolCalls = [...(result.toolCalls || [])];
 
-  if (shouldRunLlmFallback(result.intent, session.state, payload.message, payload.actionPayload)) {
+  if (shouldRunHybridAssist(config, result.intent, confidence, session.state, payload.message, payload.actionPayload)) {
     try {
-      const classification = await classifyIntent(llmClient, payload.message);
-      const llmResult = await handleIntent(config, llmClient, backend, payload, classification, payload.correlationId);
-      if (llmResult.reply && !isGenericFallbackReply(llmResult.reply)) {
-        reply = llmResult.reply;
-        alerts = llmResult.alerts;
-        ui = llmResult.ui;
-        intent = `fallback_llm_${classification.intent}`;
-        toolCalls.push(`llm_fallback:${classification.intent}`);
+      const assisted = await runHybridAssist(config, llmClient, backend, payload);
+      if (assisted) {
+        reply = assisted.reply;
+        alerts = assisted.alerts;
+        ui = assisted.ui;
+        intent = assisted.intent;
+        confidence = assisted.confidence;
+        for (const tag of assisted.toolCalls) {
+          toolCalls.push(tag);
+        }
       }
     } catch {
-      // Keep deterministic FSM fallback when LLM path fails.
+      // Keep deterministic FSM result when hybrid assist fails.
     }
   }
 
   await stateStore.saveSession(payload.channel, payload.userId, result.nextState, result.nextContext);
+  toolCalls.push(`policy_confidence:${confidence.toFixed(2)}`);
+
+  if (profileStore) {
+    try {
+      const profileInput = buildProfileUpsertInput(payload, session, result, intent);
+      await profileStore.upsertFromInteraction(profileInput);
+    } catch (error) {
+      logger.warn({ error: String(error), userId: payload.userId, channel: payload.channel }, "customer profile upsert failed");
+    }
+  }
 
   const latencyMs = Date.now() - startedAt;
   const botEvent: DialogueEventLog = {
@@ -386,13 +430,21 @@ async function handleWithDialogueEngine(
   };
 }
 
-function shouldRunLlmFallback(
+function shouldRunHybridAssist(
+  config: OpenClawConfig,
   policyIntent: string | undefined,
+  policyConfidence: number,
   stateBefore: string,
   message: string,
   actionPayload?: string,
 ): boolean {
-  if (policyIntent !== "fallback") {
+  if (!config.dialogHybridAssistEnabled) {
+    return false;
+  }
+  if (policyIntent !== "fallback" && policyIntent !== "wizard_invalid_input") {
+    return false;
+  }
+  if (policyConfidence >= config.dialogHybridAssistThreshold) {
     return false;
   }
   if ((actionPayload || "").trim().length > 0) {
@@ -421,7 +473,7 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
   const category = inferCategoryFromMessage(normalized);
 
   if (containsAny(normalized, ["xin chao", "chao", "hello", "hi", "alo", "hey"]) && normalized.length <= 24) {
-    return { intent: "greeting" };
+    return { intent: "greeting", confidence: 0.95 };
   }
 
   if (
@@ -440,7 +492,7 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
       "cach dat hang",
     ])
   ) {
-    return { intent: "bot_help" };
+    return { intent: "bot_help", confidence: 0.95 };
   }
 
   if (containsAny(normalized, [
@@ -453,7 +505,7 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
     "live agent",
     "support staff",
   ])) {
-    return { intent: "handoff_request" };
+    return { intent: "handoff_request", confidence: 0.95 };
   }
 
   if (containsAny(normalized, [
@@ -463,15 +515,15 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
     "resume bot",
     "ket thuc ho tro",
   ])) {
-    return { intent: "handoff_resume" };
+    return { intent: "handoff_resume", confidence: 0.95 };
   }
 
   if (containsAny(normalized, ["bao quan", "han su dung", "co duong", "doi tra", "giao hang", "nhiet do", "thanh phan"])) {
-    return { intent: "faq", sku };
+    return { intent: "faq", sku, confidence: 0.9 };
   }
 
   if (containsAny(normalized, ["gio mo cua", "mo cua", "dong cua", "dia chi", "o dau", "hotline", "so dien thoai", "email", "lien he"])) {
-    return { intent: "faq", sku };
+    return { intent: "faq", sku, confidence: 0.9 };
   }
 
   if (containsAny(normalized, [
@@ -504,27 +556,27 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
       )
       .replace(/\s+/g, " ")
       .trim();
-    return { intent: "catalog_list", query: stripped.length >= 2 ? stripped : undefined, category };
+    return { intent: "catalog_list", query: stripped.length >= 2 ? stripped : undefined, category, confidence: 0.85 };
   }
 
   if (category && normalized.length <= 20 && !/\d/.test(normalized)) {
-    return { intent: "catalog_list", category };
+    return { intent: "catalog_list", category, confidence: 0.8 };
   }
 
   if (/\b(chi tiet|thong tin|product)\b/.test(normalized) && sku) {
-    return { intent: "catalog_get", sku };
+    return { intent: "catalog_get", sku, confidence: 0.85 };
   }
 
   if (/\b(ma don|order status|tinh trang don|kiem tra don|kiem tra don hang)\b/.test(normalized)) {
-    return { intent: "order_get", orderCode };
+    return { intent: "order_get", orderCode, confidence: 0.85 };
   }
 
   if (/\b(thanh toan|chuyen khoan|payment|huong dan thanh toan)\b/.test(normalized)) {
-    return { intent: "payment_help", orderCode };
+    return { intent: "payment_help", orderCode, confidence: 0.85 };
   }
 
   if (/\b(dat hang|len don|order|mua)\b/.test(normalized) && /:\d+/.test(normalized)) {
-    return { intent: "order_create" };
+    return { intent: "order_create", confidence: 0.8 };
   }
 
   const classifierPrompt = [
@@ -551,15 +603,15 @@ async function classifyIntent(llmClient: LlmClient, message: string): Promise<In
       0,
     );
   } catch {
-    return { intent: "smalltalk" };
+    return { intent: "smalltalk", confidence: 0.3 };
   }
 
   const parsed = parseClassifierJsonSafe(raw);
   if (parsed) {
-    return parsed;
+    return { ...parsed, confidence: 0.6 };
   }
 
-  return { intent: "smalltalk" };
+  return { intent: "smalltalk", confidence: 0.25 };
 }
 
 async function handleIntent(
@@ -1062,6 +1114,91 @@ function parseClassifierJsonSafe(raw: string): IntentResult | null {
       return null;
     }
   }
+}
+
+async function runHybridAssist(
+  config: OpenClawConfig,
+  llmClient: LlmClient,
+  backend: ReturnType<typeof buildBackend>,
+  payload: ChatRequest,
+): Promise<{ reply: string; alerts?: string[]; ui?: ChatResult["ui"]; intent: string; confidence: number; toolCalls: string[] } | null> {
+  const classification = await classifyIntent(llmClient, payload.message);
+  const llmResult = await handleIntent(config, llmClient, backend, payload, classification, payload.correlationId ?? randomUUID());
+  if (!llmResult.reply || isGenericFallbackReply(llmResult.reply)) {
+    return null;
+  }
+  if (!passesHybridGuardrail(llmResult.reply)) {
+    return null;
+  }
+  return {
+    reply: llmResult.reply,
+    alerts: llmResult.alerts,
+    ui: llmResult.ui,
+    intent: `hybrid_${classification.intent}`,
+    confidence: Math.max(0.56, classification.confidence ?? 0.58),
+    toolCalls: [`hybrid_assist:${classification.intent}`],
+  };
+}
+
+function passesHybridGuardrail(reply: string): boolean {
+  const trimmed = reply.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.length > 600) {
+    return false;
+  }
+  const normalized = normalizeVietnamese(trimmed);
+  if (!normalized) {
+    return false;
+  }
+  if (/\b(api key|token|password|mat khau|secret)\b/i.test(trimmed)) {
+    return false;
+  }
+  return true;
+}
+
+function buildProfileUpsertInput(
+  payload: ChatRequest & { channel: ChatChannel },
+  session: { context: any },
+  result: { nextContext: any },
+  intent: string | undefined,
+): UpsertCustomerProfileInput {
+  const orderPrev = session.context?.order || {};
+  const orderNext = result.nextContext?.order || {};
+  return {
+    channel: payload.channel,
+    userId: payload.userId,
+    locale: payload.clientContext?.locale,
+    name: firstNonEmptyString(payload.profile?.name, orderNext.name, orderPrev.name),
+    phone: firstNonEmptyString(payload.profile?.phone, orderNext.phone, orderPrev.phone),
+    address: firstNonEmptyString(payload.profile?.address, orderNext.address, orderPrev.address),
+    paymentMethod: (orderNext.paymentMethod || orderPrev.paymentMethod) as "bank_transfer" | "cod" | undefined,
+    preferredCategory: inferCategoryPreference(payload.actionPayload, payload.message),
+    lastIntent: intent,
+  };
+}
+
+function inferCategoryPreference(actionPayload?: string, message?: string): string | undefined {
+  const action = String(actionPayload || "").trim().toLowerCase();
+  if (action.startsWith("action_category:")) {
+    return action.slice("action_category:".length) || undefined;
+  }
+  const normalized = normalizeVietnamese(String(message || ""));
+  if (!normalized) {
+    return undefined;
+  }
+  return inferCategoryFromMessage(normalized);
+}
+
+function firstNonEmptyString(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    const trimmed = String(value || "").trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return undefined;
 }
 
 function extractFirstJsonObject(raw: string): string | null {

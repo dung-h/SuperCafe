@@ -33,6 +33,8 @@ Background:
      - `EXTERNAL_SESSION_TTL_SEC` (default `86400`)
      - `DIALOG_ENGINE_V2_ENABLED=true|false` (default `false`, rollout safe)
      - `DIALOG_SESSION_TTL_HOURS` (default `24`)
+     - `DIALOG_HYBRID_ASSIST_ENABLED=true|false` (default `true`)
+     - `DIALOG_HYBRID_ASSIST_THRESHOLD` (default `0.55`)
      - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`, `OPENCLAW_CHAT_RATE_LIMIT_MAX`
      - `MESSENGER_WEBHOOK_RATE_LIMIT_MAX`, `MESSENGER_WEBHOOK_RATE_LIMIT_WINDOW_SEC`
      - `DB_NAME` (production DB name; fallback now supports both `lowland_coffee` and `lowland_db`)
@@ -64,6 +66,12 @@ Stop stack:
   - Response `ui.suggestions` uses object contract: `{ label, payload }`.
   - Session state and event logs persist on MySQL (`chat_dialogue_sessions`, `chat_dialogue_events`).
   - Rollback by setting `DIALOG_ENGINE_V2_ENABLED=false`.
+  - Hybrid routing:
+    - FSM always runs first.
+    - If FSM confidence is low, OpenClaw can invoke LLM assist with guardrail to improve natural conversation quality.
+  - Unified customer profile:
+    - OpenClaw persists profile memory in MySQL (`chat_user_profiles`, `chat_user_identities`).
+    - Identity links are built per channel and can auto-link by normalized phone when available.
 - Backlog 4 tuần đầu:
   - `docs/industrial-lite-v1-backlog-weeks-1-4.md`
 

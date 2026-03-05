@@ -102,6 +102,9 @@ Base URL: `http://openclaw:8082`
       }
     }
     ```
+- `GET /admin/profile?channel=<telegram|web|messenger>&userId=<id>`
+  - yeu cau `DIALOG_ENGINE_V2_ENABLED=true`
+  - tra ve profile hop nhat cua user theo mapping identity.
 - `POST /chat`
   - body:
     ```json
@@ -132,6 +135,16 @@ Base URL: `http://openclaw:8082`
     - nguong cau hinh qua env:
       - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`
       - `OPENCLAW_CHAT_RATE_LIMIT_MAX`
+  - hybrid assist:
+    - `DIALOG_HYBRID_ASSIST_ENABLED=true|false`
+    - `DIALOG_HYBRID_ASSIST_THRESHOLD=0.2..0.95` (de xuat `0.55`)
+  - profile unify:
+    - engine tu dong dong bo profile vao MySQL:
+      - `chat_user_profiles`
+      - `chat_user_identities`
+    - mapping uu tien:
+      1) identity `(channel,user_id)` da ton tai
+      2) neu chua ton tai va co so dien thoai hop le -> lien ket profile theo `phone_normalized`.
   - response:
     ```json
     {
