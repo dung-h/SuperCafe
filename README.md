@@ -52,8 +52,3 @@ SuperCafe là repository demo tổng hợp các công nghệ và quy trình tri�
 - Không commit secrets thật vào repository.
 - Không public token, key, password trong issue/PR/screenshot.
 - Nếu tái sử dụng cho môi trường production, cần rà soát lại toàn bộ chính sách bảo mật trước khi phát hành.
-
-## Phạm Vi README
-
-- README giữ ở mức technical demo để phục vụ học tập và showcase.
-- Các chi tiết hạ tầng và implementation nội bộ nhạy cảm được lược bỏ có chủ đích.
