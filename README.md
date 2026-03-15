@@ -1,231 +1,59 @@
-# SuperCafe Monorepo
+# SuperCafe
 
-Milestone repository that combines:
-- `LTW251`: PHP MVC beverage ecommerce website.
-- `OpenClaw`: chatbot services (Telegram + web + Messenger channel).
+SuperCafe là repository demo tổng hợp các công nghệ và quy trình triển khai mình đã học khi xây dựng một hệ thống bán hàng đa kênh.
 
-## Public links
+## Live Demo
 
-- Website: https://dungho.io.vn/
-- Facebook bot/page: https://facebook.com/profile.php?id=61588610807836
-- Telegram bot: https://t.me/Demo_015_bot
+- SuperCafe Website: https://dungho.io.vn/lowlandcafe/
+- Facebook Page/Bot: https://facebook.com/profile.php?id=61588610807836
+- Telegram Bot: https://t.me/Demo_015_bot
 
-## Project lineage
+## Mục Tiêu Kỹ Thuật
 
-This repository continues development from:
-- https://github.com/dung-h/LowlandCoffee
+- Xây dựng web app theo mô hình MVC.
+- Triển khai chatbot đa kênh (web, Messenger, Telegram).
+- Tổ chức lớp vận hành thực tế: health check, alert, queue worker, backup/restore, hardening.
+- Demo luồng end-to-end trên domain thật.
 
-Background:
-- `LowlandCoffee` was a Web Programming assignment completed by the author and three teammates.
-- Team/member details are kept in [LTW251 README](LTW251/README.md).
-- `SuperCafe` focuses on extending that codebase with chatbot architecture and omnichannel bot flows.
+## Giá Trị Demo
 
-## Quick start (local Docker demo)
+- Frontend bán hàng có giỏ hàng và luồng đặt hàng.
+- Chatbot tích hợp trực tiếp trên web.
+- Các kênh hội thoại hoạt động song song trên cùng hệ thống.
+- Có bộ script kiểm tra nhanh để đánh giá trạng thái vận hành.
 
-1. Prepare env:
-   - Copy `milestone.env.example` to `.env` and fill deploy values when using domain/Messenger.
-     - `PUBLIC_BASE_URL=https://<your-domain>`
-     - `WEB_BRIDGE_API_KEY=<shared-secret>`
-     - `MESSENGER_VERIFY_TOKEN`, `MESSENGER_APP_SECRET`, `MESSENGER_PAGE_ACCESS_TOKEN`
-     - `MESSENGER_AUTO_PROFILE_SETUP=true|false` (default `true`)
-     - `TELEGRAM_MINI_APP_URL` (optional, must be public HTTPS)
-     - `EXTERNAL_SESSION_SECRET` (shared signing secret for Telegram->Web identity bridge)
-     - `EXTERNAL_SESSION_TTL_SEC` (default `86400`)
-     - `DIALOG_ENGINE_V2_ENABLED=true|false` (default `false`, rollout safe)
-     - `DIALOG_SESSION_TTL_HOURS` (default `24`)
-     - `DIALOG_HYBRID_ASSIST_ENABLED=true|false` (default `true`)
-     - `DIALOG_HYBRID_ASSIST_THRESHOLD` (default `0.55`)
-     - `OPENCLAW_CHAT_RATE_LIMIT_WINDOW_SEC`, `OPENCLAW_CHAT_RATE_LIMIT_MAX`
-     - `OPENCLAW_CHAT_RATE_LIMIT_BACKEND=memory|redis|auto` (default `auto`)
-     - `OPENCLAW_RATE_LIMIT_REDIS_HOST`, `OPENCLAW_RATE_LIMIT_REDIS_PORT`, `OPENCLAW_RATE_LIMIT_REDIS_DB`, `OPENCLAW_RATE_LIMIT_REDIS_KEY_PREFIX`
-     - `MESSENGER_WEBHOOK_RATE_LIMIT_MAX`, `MESSENGER_WEBHOOK_RATE_LIMIT_WINDOW_SEC`
-     - Bot giao vận (web/messenger bridge): `BOT_DEFAULT_SHIPPING_VND`, `BOT_SHOP_LAT`, `BOT_SHOP_LNG`
-     - Sales MCP giao vận (telegram path): `DELIVERY_SHOP_LAT`, `DELIVERY_SHOP_LNG`, `DELIVERY_BASE_ETA_MINUTES`, `DELIVERY_PER_KM_ETA_MINUTES`, `DELIVERY_FALLBACK_ETA_MINUTES`
-     - `DB_NAME` (production DB name; fallback now supports both `lowland_coffee` and `lowland_db`)
-   - Edit `OpenClaw/infra/env/.env`.
-   - Set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
-2. Start stack:
-   - `powershell -ExecutionPolicy Bypass -File scripts/milestone-up.ps1 -Build`
-3. Endpoints:
-   - Website: `http://localhost:9999`
-   - OpenClaw health: `http://localhost:8082/health`
-   - Sales MCP health: `http://localhost:8081/health`
-   - Telegram gateway health: `http://localhost:8083/health`
-   - Mailhog: `http://localhost:8025`
+## Cấu Trúc Chính
 
-Stop stack:
-- `powershell -ExecutionPolicy Bypass -File scripts/milestone-down.ps1`
+- `LTW251/`: ứng dụng web SuperCafe (PHP MVC).
+- `OpenClaw/`: dịch vụ chatbot và gateway đa kênh.
+- `scripts/`: script vận hành và smoke-check.
+- `docs/`: runbook và tài liệu tổng quan.
 
-## Architecture notes
-
-- Website widget -> `LTW251/?r=site/chatbot` -> `OpenClaw /chat` with `channel=web`.
-- OpenClaw web channel uses `LTW251` bridge API (`BotBridgeController`) as product/order source.
-- Telegram flow remains on existing `sales-mcp` backend.
-- Telegram -> Web bridge:
-  - Gateway generates signed `tg_session` on Mini App link.
-  - Web widget forwards token to `/?r=site/chatbot`.
-  - `SiteController` verifies token and maps stable user id `web-tg-<telegram_id>`.
-- Industrial Lite v1 dialogue engine:
-  - Request supports `actionPayload` + `clientContext`.
-  - Response `ui.suggestions` uses object contract: `{ label, payload }`.
-  - Session state and event logs persist on MySQL (`chat_dialogue_sessions`, `chat_dialogue_events`).
-  - Rollback by setting `DIALOG_ENGINE_V2_ENABLED=false`.
-  - Hybrid routing:
-    - FSM always runs first.
-    - If FSM confidence is low, OpenClaw can invoke LLM assist with guardrail to improve natural conversation quality.
-  - Unified customer profile:
-    - OpenClaw persists profile memory in MySQL (`chat_user_profiles`, `chat_user_identities`).
-    - Identity links are built per channel and can auto-link by normalized phone when available.
-  - Delivery estimate:
-    - Nếu địa chỉ có tọa độ Google Maps, backend tự tính `shippingVnd` và `estimatedDeliveryMinutes`.
-    - Nếu không có tọa độ, dùng phí ship mặc định theo env.
-- Backlog 4 tuần đầu:
-  - `docs/industrial-lite-v1-backlog-weeks-1-4.md`
-
-## Messenger webhook
-
-- Callback URL: `https://<your-domain>/?r=messenger/webhook`
-- Verify token env on website service: `MESSENGER_VERIFY_TOKEN`
-- Optional hardening:
-  - `MESSENGER_APP_SECRET` for signature validation (`X-Hub-Signature-256`)
-  - `MESSENGER_PAGE_ACCESS_TOKEN` to send replies via Graph API
-
-### Messenger webhook smoke test
-
-Run after deploy:
-
-```bash
-./scripts/messenger-webhook-smoke.sh
-```
-
-This script verifies:
-- GET challenge (`hub.mode/hub.verify_token/hub.challenge`)
-- POST event is processed once
-- duplicate POST is detected (`duplicates=1`)
-
-Handoff command (all channels):
-- Request human support: `gặp tư vấn viên`
-- Return to bot: `tiếp tục với bot`
-
-## Chatbot smoke test
-
-Run after deploy:
+## Lệnh Vận Hành Nhanh
 
 ```bash
 ./scripts/chatbot-smoke.sh
 ./scripts/omnichannel-smoke.sh
+./scripts/ops-dashboard.sh
 ./scripts/sre-alert-check.sh
+./scripts/ops-guardian.sh
+./scripts/ops-alert-test.sh
 ```
 
-Regression quality gate (NLU/FSM):
+## Monitoring Và Alert
 
-```bash
-cd OpenClaw
-npm run -w @openclaw/openclaw eval:dialogue
-```
+- Kiểm tra định kỳ: `scripts/sre-alert-check.sh`
+- Giám sát + auto-heal: `scripts/ops-guardian.sh`
+- Test kênh cảnh báo: `scripts/ops-alert-test.sh`
+- Runbook vận hành: `docs/ops-runbook.md`
 
-Report path:
-- `OpenClaw/services/openclaw/.artifacts/dialogue-eval-report.json`
+## Lưu Ý Bảo Mật
 
-Observability alert check (5-minute window by default):
+- Không commit secrets thật vào repository.
+- Không public token, key, password trong issue/PR/screenshot.
+- Nếu tái sử dụng cho môi trường production, cần rà soát lại toàn bộ chính sách bảo mật trước khi phát hành.
 
-- KPI thresholds:
-  - `MAX_FALLBACK_RATE` (default `12`)
-  - `MAX_ACTION_ERROR_RATE` (default `3`)
-  - `MIN_ORDER_COMPLETION_RATE` (default `55`)
-  - `MIN_ORDER_START_COUNT_FOR_COMPLETION_ALERT` (default `5`, avoid low-traffic false positives)
-- Delivery thresholds:
-  - `MAX_WEBHOOK_SEND_FAIL_RATE` (default `3`)
-  - `MAX_DB_ERROR_RATE` (default `1`)
-- Optional alert notify:
-  - `ALERT_NOTIFY_MODE=off|fail_only|always`
-  - `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID`
-  - `ALERT_WEBHOOK_URL`
+## Phạm Vi README
 
-Install cron (every 10 minutes) for continuous check:
-
-```bash
-chmod +x scripts/install-sre-cron.sh
-./scripts/install-sre-cron.sh install
-```
-
-Runbook:
-- `docs/ops-runbook.md`
-
-Ops backup / DR:
-
-```bash
-./scripts/backup-supercafe.sh
-./scripts/install-backup-cron.sh install
-```
-
-Knowledge base cho chatbot:
-- Tài liệu: `docs/lowland-coffee-chatbot-kb.md`
-- Seed FAQ vào DB:
-  - `php LTW251/scripts/seed_chatbot_kb.php`
-
-Or run manually:
-
-```bash
-curl -sS -H 'Content-Type: application/json' \
-  -d '{"userId":"web-smoke","message":"có các món nào","channel":"web"}' \
-  http://127.0.0.1:8082/chat
-```
-
-Expected:
-- `ok: true`
-- `data.reply` contains `Menu đồ uống`
-- `data.ui.type` equals `menu`
-- `data.ui.items` has menu cards for web widget
-- `data.ui.suggestions[]` has `{label,payload}`
-
-## KPI summary (dialogue v2)
-
-When `DIALOG_ENGINE_V2_ENABLED=true`, OpenClaw exposes:
-
-- `GET /admin/kpi/summary?windowMinutes=60`
-
-Ops summary endpoint:
-- `GET /admin/ops/summary?windowMinutes=60`
-- Includes:
-  - process/memory snapshot
-  - dialogue DB connectivity check
-  - handoff Redis check
-  - chat rate-limiter backend health (redis/memory fallback)
-  - optional embedded KPI summary when dialogue v2 is enabled
-
-Response includes:
-- `channels[].rates.fallbackRate`
-- `channels[].rates.orderWizardCompletionRate`
-- `channels[].rates.actionErrorRate`
-- `overall` aggregated counters/rates for all channels
-
-## Security warning
-
-- Do not commit real secrets.
-- Keep secrets only in local/server `.env` files and rotate any leaked keys before release.
-
-## Deploy under `/lowlandcoffee`
-
-Supported, but set base URL explicitly:
-- `PUBLIC_BASE_URL=https://dungho.io.vn/lowlandcoffee`
-
-Nginx sample:
-
-```nginx
-location ^~ /lowlandcoffee/ {
-    alias /var/www/supercafe/LTW251/public/;
-    index index.php;
-    try_files $uri $uri/ /lowlandcoffee/index.php?$query_string;
-}
-
-location ~ ^/lowlandcoffee/(.+\\.php)$ {
-    alias /var/www/supercafe/LTW251/public/$1;
-    include fastcgi_params;
-    fastcgi_param SCRIPT_FILENAME /var/www/supercafe/LTW251/public/$1;
-    fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-}
-```
-
-Note:
-- Legacy links dạng `/?r=...` đã có lớp rewrite runtime để tương thích khi chạy dưới subpath.
+- README giữ ở mức technical demo để phục vụ học tập và showcase.
+- Các chi tiết hạ tầng và implementation nội bộ nhạy cảm được lược bỏ có chủ đích.
