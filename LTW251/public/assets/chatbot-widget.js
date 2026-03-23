@@ -1,6 +1,7 @@
 (function () {
   var storageKey = 'lowland_chatbot_history_v3';
   var externalSessionStorageKey = 'lowland_external_session_token_v1';
+  var bootstrapHintSigStorageKey = 'lowland_chatbot_bootstrap_sig_v1';
   var widget = document.getElementById('chatbot-widget');
   var toggleBtn = document.getElementById('chatbot-toggle');
   var closeBtn = document.getElementById('chatbot-close');
@@ -11,6 +12,8 @@
   var quick = document.getElementById('chatbot-quick');
   var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
   var isSending = false;
+  var handoffPollTimer = null;
+  var handoffPollIntervalMs = 3500;
   var addressApiBase = 'https://provinces.open-api.vn/api';
   var addressDataCache = {
     provinces: null,
@@ -71,6 +74,15 @@
     if (submitBtn) submitBtn.disabled = isSending;
   }
 
+  function normalizeVi(input) {
+    return String(input || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   function normalizeSuggestion(entry) {
     if (!entry) return null;
     if (typeof entry === 'string') {
@@ -122,6 +134,42 @@
 
   function isOrderReviewPayload(payload) {
     return String(payload || '').indexOf('OPEN_WEB_REVIEW:') === 0;
+  }
+
+  function isOpenWebMenuPayload(payload) {
+    return String(payload || '').trim() === 'OPEN_WEB_MENU';
+  }
+
+  function isOpenWebCartPayload(payload) {
+    return String(payload || '').trim() === 'OPEN_WEB_CART';
+  }
+
+  function isOpenUrlPayload(payload) {
+    return String(payload || '').indexOf('OPEN_URL:') === 0;
+  }
+
+  function parseOpenUrlPayload(payload) {
+    var raw = String(payload || '');
+    if (!isOpenUrlPayload(raw)) return '';
+    return raw.slice('OPEN_URL:'.length).trim();
+  }
+
+  function isSendTextPayload(payload) {
+    return String(payload || '').indexOf('SEND_TEXT:') === 0;
+  }
+
+  function parseSendTextPayload(payload) {
+    var raw = String(payload || '');
+    if (!isSendTextPayload(raw)) return '';
+    return raw.slice('SEND_TEXT:'.length).trim();
+  }
+
+  function buildWebMenuUrl() {
+    return baseUrl + '/?r=product/list';
+  }
+
+  function buildWebCartUrl() {
+    return baseUrl + '/?r=cart/index';
   }
 
   function normalizeReviewItemsPayload(rawItems) {
@@ -232,6 +280,28 @@
       chip.className = 'chatbot-chip';
       chip.textContent = s.label;
       chip.addEventListener('click', function () {
+        if (isOpenWebMenuPayload(s.payload)) {
+          window.open(buildWebMenuUrl(), '_blank', 'noopener');
+          return;
+        }
+        if (isOpenWebCartPayload(s.payload)) {
+          window.open(buildWebCartUrl(), '_blank', 'noopener');
+          return;
+        }
+        if (isOpenUrlPayload(s.payload)) {
+          var targetUrl = parseOpenUrlPayload(s.payload);
+          if (targetUrl) {
+            window.open(targetUrl, '_blank', 'noopener');
+            return;
+          }
+        }
+        if (isSendTextPayload(s.payload)) {
+          var suggestedText = parseSendTextPayload(s.payload);
+          if (suggestedText) {
+            submitUserMessage(suggestedText, null);
+            return;
+          }
+        }
         if (isOrderReviewPayload(s.payload)) {
           var reviewUrl = buildOrderReviewUrl(s.payload);
           if (reviewUrl) {
@@ -834,6 +904,160 @@
     ];
   }
 
+  function findLastBotEntry(history) {
+    for (var i = history.length - 1; i >= 0; i--) {
+      if (history[i] && history[i].role === 'bot') {
+        return history[i];
+      }
+    }
+    return null;
+  }
+
+  function normalizeMenuUiFromServer(rawUi) {
+    if (!rawUi || rawUi.type !== 'menu') return null;
+    var items = Array.isArray(rawUi.items) ? rawUi.items.map(function (item) {
+      return {
+        sku: String(item && item.sku ? item.sku : ''),
+        name: String(item && item.name ? item.name : ''),
+        category: String(item && item.category ? item.category : ''),
+        priceVnd: Number(item && item.priceVnd ? item.priceVnd : 0),
+        stockQty: Number(item && item.stockQty ? item.stockQty : 0)
+      };
+    }).filter(function (item) {
+      return !!item.sku && !!item.name;
+    }) : [];
+    var suggestions = normalizeSuggestions(rawUi.suggestions || []);
+    return {
+      type: 'menu',
+      title: String(rawUi.title || ''),
+      items: items,
+      suggestions: suggestions
+    };
+  }
+
+  function normalizeHandoffHistory(serverHistory) {
+    if (!Array.isArray(serverHistory)) return [];
+    var out = [];
+    for (var i = 0; i < serverHistory.length; i += 1) {
+      var row = serverHistory[i] || {};
+      var content = String(row.content || '').trim();
+      if (!content) continue;
+      out.push({
+        id: String(row.id || ''),
+        role: String(row.role || '') === 'user' ? 'user' : 'bot',
+        text: content,
+        ui: normalizeMenuUiFromServer(row.ui),
+        timestampMs: Number(row.timestampMs || 0)
+      });
+    }
+    return out;
+  }
+
+  function historySignature(history) {
+    if (!Array.isArray(history)) return '';
+    return history.map(function (entry) {
+      var ui = entry && entry.ui ? JSON.stringify(entry.ui) : '';
+      return [
+        String(entry && entry.id ? entry.id : ''),
+        String(entry && entry.role ? entry.role : ''),
+        String(entry && entry.text ? entry.text : ''),
+        String(entry && entry.timestampMs ? entry.timestampMs : ''),
+        ui
+      ].join('|');
+    }).join('||');
+  }
+
+  function syncHistoryFromServer(serverHistory) {
+    var normalized = normalizeHandoffHistory(serverHistory);
+    if (normalized.length === 0) return false;
+
+    var localHistory = loadHistory();
+    if (historySignature(localHistory) === historySignature(normalized)) {
+      return false;
+    }
+
+    saveHistory(normalized);
+    renderHistory();
+    return true;
+  }
+
+  function isHandoffWaitingEntry(entry) {
+    if (!entry || entry.role !== 'bot') return false;
+    var text = normalizeVi(entry.text || '');
+    if (!text) return false;
+    if (text.indexOf('tu van vien') < 0) return false;
+    if (text.indexOf('tiep tuc voi bot') < 0) return false;
+    return true;
+  }
+
+  function isHandoffWaitingReplyText(text) {
+    var normalized = normalizeVi(text);
+    return normalized.indexOf('tu van vien') >= 0 && normalized.indexOf('tiep tuc voi bot') >= 0;
+  }
+
+  function syncHandoffPolling() {
+    var history = loadHistory();
+    var lastBot = findLastBotEntry(history);
+    var shouldPoll = isHandoffWaitingEntry(lastBot);
+    if (!shouldPoll) {
+      stopHandoffPolling();
+      return;
+    }
+    startHandoffPolling();
+  }
+
+  function startHandoffPolling() {
+    if (handoffPollTimer) return;
+    pollHandoffAgentMessage();
+    handoffPollTimer = window.setInterval(function () {
+      pollHandoffAgentMessage();
+    }, handoffPollIntervalMs);
+  }
+
+  function stopHandoffPolling() {
+    if (!handoffPollTimer) return;
+    window.clearInterval(handoffPollTimer);
+    handoffPollTimer = null;
+  }
+
+  async function pollHandoffAgentMessage() {
+    if (isSending) return;
+    try {
+      var response = await sendMessage({
+        message: '',
+        actionPayload: 'ACTION_HANDOFF_STATUS'
+      });
+      if (!response || !response.reply) return;
+
+      if (response.handoff && Array.isArray(response.handoff.history)) {
+        var didSync = syncHistoryFromServer(response.handoff.history);
+        if (didSync) {
+          return;
+        }
+      }
+
+      if (isHandoffWaitingReplyText(response.reply)) return;
+
+      var history = loadHistory();
+      var lastBot = findLastBotEntry(history);
+      if (lastBot && normalizeVi(lastBot.text || '') === normalizeVi(response.reply || '')) {
+        return;
+      }
+
+      var botEntry = {
+        role: 'bot',
+        text: response.reply || '',
+        ui: response.ui || null,
+        state: response.state || null
+      };
+      addMessage(botEntry, true);
+      history.push(botEntry);
+      saveHistory(history);
+      setQuickChips(botEntry.ui && botEntry.ui.suggestions ? botEntry.ui.suggestions : defaultSuggestions());
+      syncHandoffPolling();
+    } catch (e) { }
+  }
+
   function renderHistory() {
     messages.innerHTML = '';
     var history = loadHistory();
@@ -849,6 +1073,7 @@
       addMessage(welcome, false);
       saveHistory([welcome]);
       setQuickChips(welcome.ui.suggestions);
+      syncHandoffPolling();
       return;
     }
 
@@ -856,15 +1081,10 @@
       addMessage(m, false);
     });
 
-    var lastBot = null;
-    for (var i = history.length - 1; i >= 0; i--) {
-      if (history[i] && history[i].role === 'bot') {
-        lastBot = history[i];
-        break;
-      }
-    }
+    var lastBot = findLastBotEntry(history);
     var suggestions = lastBot && lastBot.ui ? lastBot.ui.suggestions : defaultSuggestions();
     setQuickChips(suggestions);
+    syncHandoffPolling();
   }
 
   async function sendMessage(payload) {
@@ -889,6 +1109,105 @@
       throw new Error((data && data.error) || 'Lỗi hệ thống');
     }
     return data.data;
+  }
+
+  async function fetchBootstrapData() {
+    var body = {};
+    if (externalSessionToken) {
+      body.externalSessionToken = externalSessionToken;
+    }
+    var resp = await fetch(baseUrl + '/?r=site/chatbotBootstrap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) return null;
+    var data = await resp.json();
+    if (!data || !data.ok || !data.data) return null;
+    return data.data;
+  }
+
+  function applyBootstrapData(data) {
+    if (!data || typeof data !== 'object') return;
+    var draft = (data.draft && typeof data.draft === 'object') ? data.draft : null;
+    var recentOrder = (data.recentOrder && typeof data.recentOrder === 'object') ? data.recentOrder : null;
+    var webCart = (data.webCart && typeof data.webCart === 'object') ? data.webCart : null;
+
+    var hasDraft = !!(draft && draft.hasDraft);
+    var hasRecentOrder = !!(recentOrder && recentOrder.orderCode);
+    var hasWebCart = !!(webCart && Number(webCart.totalQty || 0) > 0);
+    if (!hasDraft && !hasRecentOrder && !hasWebCart) return;
+
+    var signature = [
+      hasDraft ? String(draft.itemsPayload || '') : '',
+      hasRecentOrder ? String(recentOrder.orderCode || '') : '',
+      hasWebCart ? String(webCart.totalQty || 0) : '',
+      webCart && webCart.sync && webCart.sync.applied ? '1' : '0'
+    ].join('|');
+
+    try {
+      var oldSignature = String(sessionStorage.getItem(bootstrapHintSigStorageKey) || '');
+      if (oldSignature && oldSignature === signature) {
+        return;
+      }
+      sessionStorage.setItem(bootstrapHintSigStorageKey, signature);
+    } catch (e) { }
+
+    var lines = [];
+    if (hasDraft) {
+      lines.push(
+        'Mình thấy bạn đang có giỏ dở dang: ' +
+        String(draft.itemCount || 0) +
+        ' món (tạm tính ' + String(draft.subtotalText || '0 đ') + ').'
+      );
+    }
+    if (!hasDraft && hasWebCart) {
+      lines.push(
+        'Giỏ hàng web của bạn đang có ' +
+        String(webCart.totalQty || 0) +
+        ' món (tạm tính ' + String(webCart.subtotalText || '0 đ') + ').'
+      );
+    }
+    if (webCart && webCart.sync && webCart.sync.applied) {
+      lines.push('Mình đã đồng bộ giỏ này vào mục Giỏ hàng trên web cho bạn.');
+    }
+    if (hasRecentOrder) {
+      lines.push(
+        'Đơn gần nhất: ' +
+        String(recentOrder.orderCode || '') +
+        ' - ' +
+        String(recentOrder.statusLabel || recentOrder.status || '')
+      );
+    }
+    if (lines.length === 0) return;
+
+    var suggestions = [];
+    if (hasDraft && draft.reviewUrl) {
+      suggestions.push({ label: 'Tiếp tục đơn cũ', payload: 'OPEN_URL:' + String(draft.reviewUrl) });
+    }
+    if (webCart && webCart.url) {
+      suggestions.push({ label: 'Mở giỏ web', payload: 'OPEN_URL:' + String(webCart.url) });
+    } else {
+      suggestions.push({ label: 'Mở giỏ web', payload: 'OPEN_WEB_CART' });
+    }
+    if (hasRecentOrder) {
+      suggestions.push({ label: 'Tra cứu đơn gần nhất', payload: 'SEND_TEXT:Kiểm tra đơn ' + String(recentOrder.orderCode || '') });
+    }
+
+    var botEntry = {
+      role: 'bot',
+      text: lines.join('\n'),
+      ui: {
+        type: 'menu',
+        suggestions: suggestions
+      }
+    };
+
+    addMessage(botEntry, true);
+    var history = loadHistory();
+    history.push(botEntry);
+    saveHistory(history);
+    setQuickChips(suggestions);
   }
 
   async function submitUserMessage(rawText, actionPayload) {
@@ -931,6 +1250,7 @@
 
       var suggestions = botEntry.ui && botEntry.ui.suggestions ? botEntry.ui.suggestions : defaultSuggestions();
       setQuickChips(suggestions);
+      syncHandoffPolling();
     } catch (err) {
       if (loadingNode && loadingNode.parentNode) {
         loadingNode.parentNode.removeChild(loadingNode);
@@ -941,6 +1261,7 @@
       history.push(fallback);
       saveHistory(history);
       setQuickChips(defaultSuggestions());
+      syncHandoffPolling();
     } finally {
       setSending(false);
       input.focus();
@@ -966,4 +1287,10 @@
   });
 
   renderHistory();
+  (async function () {
+    try {
+      var bootstrapData = await fetchBootstrapData();
+      applyBootstrapData(bootstrapData);
+    } catch (e) { }
+  })();
 })();

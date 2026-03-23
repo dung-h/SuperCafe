@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
+import { Redis } from "ioredis";
 import type { Pool } from "mysql2/promise";
 import pinoHttp from "pino-http";
 import { z } from "zod";
@@ -11,12 +12,12 @@ import { DialoguePolicyEngine } from "./dialogue/policyEngine";
 import { CustomerProfileStoreMySql, type UpsertCustomerProfileInput } from "./dialogue/customerProfileStoreMySql";
 import { DialogueStateStoreMySql } from "./dialogue/stateStoreMySql";
 import type { DialogueEventLog, UiSuggestion } from "./dialogue/types";
-import { HandoffStore } from "./handoffStore";
+import { HandoffStore, type ChatMessage, type ChatMessageUi, type ChatUiSuggestion } from "./handoffStore";
 import { LlmClient } from "./llmClient";
 import { logger } from "./logger";
 import { createChatRateLimiter, type RateLimiterHealth } from "./rateLimiter";
 
-type ChatChannel = "telegram" | "web" | "messenger";
+type ChatChannel = "telegram" | "web" | "messenger" | "modernfashion_web";
 
 type ChatRequest = {
   userId: string;
@@ -33,6 +34,7 @@ type ChatRequest = {
     phone?: string;
     address?: string;
   };
+  adminBypassHandoff?: boolean;
 };
 
 type IntentResult = ClassifyResult & {
@@ -48,6 +50,21 @@ type MenuUiItem = {
   stockQty: number;
 };
 
+type ChatMenuUi = {
+  type: "menu";
+  title: string;
+  items: MenuUiItem[];
+  suggestions?: Array<string | UiSuggestion>;
+};
+
+type HandoffClientMessage = {
+  id: string;
+  role: "user" | "bot" | "agent";
+  content: string;
+  timestampMs: number;
+  ui?: ChatMenuUi;
+};
+
 type ChatResult = {
   reply: string;
   alerts?: string[];
@@ -55,12 +72,16 @@ type ChatResult = {
     name: string;
     missingFields: string[];
   };
-  ui?: {
-    type: "menu";
-    title: string;
-    items: MenuUiItem[];
-    suggestions?: Array<string | UiSuggestion>;
+  ui?: ChatMenuUi;
+  handoff?: {
+    active: boolean;
+    history?: HandoffClientMessage[];
   };
+};
+
+type DialogueChatExecution = {
+  chat: ChatResult;
+  intent?: string;
 };
 
 const chatSchema = z.object({
@@ -68,7 +89,7 @@ const chatSchema = z.object({
   message: z.string().optional().default(""),
   actionPayload: z.preprocess((value) => (value === null ? undefined : value), z.string().max(255).optional()),
   correlationId: z.string().optional(),
-  channel: z.enum(["telegram", "web", "messenger"]).optional(),
+  channel: z.enum(["telegram", "web", "messenger", "modernfashion_web"]).optional(),
   clientContext: z
     .object({
       sourceMessageId: z.string().optional(),
@@ -82,6 +103,7 @@ const chatSchema = z.object({
       address: z.string().optional(),
     })
     .optional(),
+  adminBypassHandoff: z.boolean().optional().default(false),
 }).superRefine((value, ctx) => {
   const hasMessage = value.message.trim().length > 0;
   const hasAction = (value.actionPayload || "").trim().length > 0;
@@ -99,7 +121,7 @@ const kpiSchema = z.object({
 });
 
 const profileQuerySchema = z.object({
-  channel: z.enum(["telegram", "web", "messenger"]),
+  channel: z.enum(["telegram", "web", "messenger", "modernfashion_web"]),
   userId: z.string().min(1),
 });
 
@@ -121,12 +143,35 @@ const KPI_ACTION_ERROR_INTENTS = [
   "order_status_missing_code",
 ] as const;
 
+function isHealthRoute(url?: string): boolean {
+  if (!url) {
+    return false;
+  }
+  return url.startsWith("/health") || url.startsWith("/ready");
+}
+
 export function createApp(config: OpenClawConfig) {
   const app = express();
   const toolHttpClient = new HttpClient(config.timeoutMs);
   const llmHttpClient = new HttpClient(config.llmTimeoutMs);
   const llmClient = new LlmClient(config, llmHttpClient);
   const handoffStore = new HandoffStore();
+  const messengerOpsRedis = config.messengerQueueAlertEnabled
+    ? new Redis({
+        host: config.messengerRedisHost,
+        port: config.messengerRedisPort,
+        password: config.messengerRedisPass,
+        db: config.messengerRedisDb,
+        lazyConnect: true,
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+      })
+    : null;
+  if (messengerOpsRedis) {
+    messengerOpsRedis.on("error", (error) => {
+      logger.warn({ error: String(error) }, "messenger ops redis error");
+    });
+  }
   const chatRateLimiter = createChatRateLimiter({
     mode: config.chatRateLimitBackend,
     maxRequests: config.chatRateLimitMax,
@@ -155,6 +200,18 @@ export function createApp(config: OpenClawConfig) {
     pinoHttp({
       logger,
       genReqId: (req) => (req.headers["x-correlation-id"] as string) || randomUUID(),
+      autoLogging: {
+        ignore: (req) => req.method === "GET" && isHealthRoute(req.url),
+      },
+      customLogLevel: (_req, res, err) => {
+        if (err || res.statusCode >= 500) {
+          return "error";
+        }
+        if (res.statusCode >= 400) {
+          return "warn";
+        }
+        return "info";
+      },
     }),
   );
 
@@ -183,6 +240,8 @@ export function createApp(config: OpenClawConfig) {
     try {
       const query = opsSummaryQuerySchema.parse(req.query);
       const summary = await buildOpsSummary({
+        config,
+        messengerOpsRedis,
         dialoguePool: dialogueStateStore?.getPool() || null,
         handoffStore,
         rateLimiterHealth: await chatRateLimiter.healthCheck(),
@@ -203,6 +262,10 @@ export function createApp(config: OpenClawConfig) {
       const channel = payload.channel ?? "telegram";
       const messageText = payload.message.trim();
       const actionPayload = (payload.actionPayload || "").trim() || undefined;
+      const inboundText = legacyTextFromAction(messageText, actionPayload);
+      const adminBypassHandoff = Boolean(payload.adminBypassHandoff);
+      const requestedResume = isHandoffResumeSignal(messageText, actionPayload);
+      const handoffStatusPing = (actionPayload || "").toUpperCase() === "ACTION_HANDOFF_STATUS";
       const rateKey = `${channel}:${payload.userId}`;
       const rateLimit = await chatRateLimiter.hit(rateKey);
       if (!rateLimit.allowed) {
@@ -224,12 +287,75 @@ export function createApp(config: OpenClawConfig) {
         return;
       }
 
+      if (!adminBypassHandoff && !handoffStatusPing && inboundText.trim().length > 0) {
+        await handoffStore.appendConversation(channel, payload.userId, "user", inboundText);
+      }
+
+      if (!adminBypassHandoff && await handoffStore.isActive(channel, payload.userId)) {
+        if (!requestedResume) {
+          if (!handoffStatusPing && inboundText.trim().length > 0) {
+            await handoffStore.appendMessage(channel, payload.userId, "user", inboundText);
+          }
+          const pendingAgentMessage = await handoffStore.consumeLatestAgentMessage(channel, payload.userId);
+          const includeHistory = handoffStatusPing || Boolean(pendingAgentMessage);
+          const sessionSnapshot = includeHistory ? await handoffStore.getSession(channel, payload.userId) : null;
+          const handoffData = {
+            active: true,
+            ...(includeHistory ? { history: serializeHandoffHistory(sessionSnapshot?.history || []) } : {}),
+          };
+          if (pendingAgentMessage?.content) {
+            res.json({
+              ok: true,
+              data: normalizeChatResult({
+                reply: pendingAgentMessage.content,
+                ui: pendingAgentMessage.ui
+                  ? toRuntimeMenuUi(pendingAgentMessage.ui)
+                  : {
+                      type: "menu",
+                      title: "Hỗ trợ trực tiếp",
+                      items: [],
+                      suggestions: ["Tiếp tục với bot", "Xem menu"],
+                    },
+                handoff: handoffData,
+              }),
+            });
+            return;
+          }
+          const waiting = buildHandoffWaitingReply(channel);
+          res.json({
+            ok: true,
+            data: normalizeChatResult({
+              ...waiting,
+              handoff: handoffData,
+            }),
+          });
+          return;
+        }
+      }
+
+      if (adminBypassHandoff && handoffStatusPing) {
+        res.json({
+          ok: true,
+          data: normalizeChatResult({
+            reply: "Không thể kiểm tra trạng thái handoff ở chế độ bypass admin.",
+            ui: {
+              type: "menu",
+              title: "Handoff status",
+              items: [],
+              suggestions: ["Tiếp tục với bot", "Xem menu"],
+            },
+          }),
+        });
+        return;
+      }
+
       const backend = buildBackend(channel as BackendChannel, config, toolHttpClient);
       let result: ChatResult | null = null;
+      let resolvedIntent: string | undefined;
 
       if (config.dialogEngineV2Enabled && dialogueStateStore && dialogueEventLogger) {
         try {
-          result = await handleWithDialogueEngine(
+          const execution = await handleWithDialogueEngine(
             config,
             llmClient,
             dialogueStateStore,
@@ -244,37 +370,44 @@ export function createApp(config: OpenClawConfig) {
               correlationId,
             },
           );
+          result = execution.chat;
+          resolvedIntent = execution.intent;
         } catch (error) {
           req.log.error({ error: String(error) }, "dialogue engine v2 failed; fallback to legacy");
         }
       }
 
       if (!result) {
-        const legacyMessage = legacyTextFromAction(messageText, actionPayload);
         const legacyPayload: ChatRequest = {
           ...payload,
-          message: legacyMessage,
+          message: inboundText,
           actionPayload,
           channel,
+          adminBypassHandoff,
         };
-        const classification = await classifyIntent(llmClient, legacyMessage);
-        if (await handoffStore.isActive(channel, payload.userId) && classification.intent !== "handoff_resume") {
-          await handoffStore.appendMessage(channel, payload.userId, "user", legacyMessage);
-          res.json({
-            ok: true,
-            data: normalizeChatResult(buildHandoffWaitingReply(channel)),
-          });
-          return;
-        }
+        const classification = await classifyIntent(llmClient, inboundText);
         result = await handleIntent(config, llmClient, backend, legacyPayload, classification, correlationId);
+        resolvedIntent = classification.intent;
+      }
 
-        if (classification.intent === "handoff_request") {
-          await handoffStore.activate(channel, payload.userId, legacyMessage);
-        } else if (classification.intent === "handoff_resume") {
+      const storedBotUi = toStoredMenuUi(result.ui);
+      const hasBotReply = result.reply.trim().length > 0;
+
+      if (!adminBypassHandoff && hasBotReply) {
+        await handoffStore.appendConversation(channel, payload.userId, "bot", result.reply, storedBotUi);
+      }
+
+      if (!adminBypassHandoff) {
+        if (resolvedIntent === "handoff_request") {
+          await handoffStore.activate(channel, payload.userId, inboundText);
+        } else if (resolvedIntent === "handoff_resume" || requestedResume) {
           await handoffStore.release(channel, payload.userId);
         }
       }
 
+      if (!adminBypassHandoff) {
+        await dispatchAdminAlerts(config, result.alerts, channel);
+      }
       res.json({ ok: true, data: normalizeChatResult(result) });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -287,6 +420,64 @@ export function createApp(config: OpenClawConfig) {
     try {
       const activeSessions = await handoffStore.getAllActiveSessions();
       res.json({ ok: true, data: activeSessions });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  const sessionIdentitySchema = z.object({
+    channel: z.enum(["telegram", "web", "messenger", "modernfashion_web"]),
+    userId: z.string().min(1),
+  });
+
+  app.get("/admin/handoff/session", async (req, res) => {
+    try {
+      const query = sessionIdentitySchema.parse(req.query);
+      const session = await handoffStore.getSession(query.channel, query.userId);
+      if (!session) {
+        res.status(404).json({ ok: false, error: "Handoff session not active" });
+        return;
+      }
+      res.json({ ok: true, data: session });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  const deleteMessageSchema = sessionIdentitySchema.extend({
+    messageId: z.string().min(1),
+  });
+
+  app.post("/admin/handoff/message/delete", async (req, res) => {
+    try {
+      const payload = deleteMessageSchema.parse(req.body);
+      const removed = await handoffStore.deleteMessage(payload.channel, payload.userId, payload.messageId);
+      if (!removed) {
+        res.status(404).json({ ok: false, error: "Message not found" });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  const deleteSessionSchema = sessionIdentitySchema.extend({
+    deleteContext: z.boolean().optional().default(true),
+  });
+
+  app.post("/admin/handoff/session/delete", async (req, res) => {
+    try {
+      const payload = deleteSessionSchema.parse(req.body);
+      const deleted = await handoffStore.deleteSession(payload.channel, payload.userId, payload.deleteContext);
+      if (!deleted) {
+        res.status(404).json({ ok: false, error: "Session not found" });
+        return;
+      }
+      res.json({ ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ ok: false, error: message });
@@ -309,10 +500,31 @@ export function createApp(config: OpenClawConfig) {
     }
   });
 
+  const replySuggestionSchema = z.object({
+    label: z.string().min(1).max(64),
+    payload: z.string().min(1).max(255),
+  });
+
+  const replyItemSchema = z.object({
+    sku: z.string().min(1).max(64),
+    name: z.string().min(1).max(120),
+    category: z.string().max(80).optional(),
+    priceVnd: z.coerce.number().min(0),
+    stockQty: z.coerce.number().min(0),
+  });
+
+  const replyUiSchema = z.object({
+    type: z.literal("menu"),
+    title: z.string().min(1).max(120),
+    items: z.array(replyItemSchema).max(24),
+    suggestions: z.array(replySuggestionSchema).max(16).optional(),
+  });
+
   const replySchema = z.object({
-    channel: z.enum(["telegram", "web", "messenger"]),
+    channel: z.enum(["telegram", "web", "messenger", "modernfashion_web"]),
     userId: z.string().min(1),
     message: z.string().min(1),
+    ui: replyUiSchema.optional(),
   });
 
   app.post("/admin/handoff/reply", async (req, res) => {
@@ -324,7 +536,9 @@ export function createApp(config: OpenClawConfig) {
         return;
       }
 
-      await handoffStore.appendMessage(payload.channel, payload.userId, "agent", payload.message);
+      const uiPayload = payload.ui ? toStoredMenuUi(payload.ui) : undefined;
+      await handoffStore.appendMessage(payload.channel, payload.userId, "agent", payload.message, uiPayload);
+      await handoffStore.appendConversation(payload.channel, payload.userId, "agent", payload.message, uiPayload);
 
       if (payload.channel === "telegram" && config.telegramToken) {
         const tgRes = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
@@ -368,7 +582,7 @@ async function handleWithDialogueEngine(
   profileStore: CustomerProfileStoreMySql | null,
   backend: ReturnType<typeof buildBackend>,
   payload: ChatRequest & { channel: ChatChannel; correlationId: string },
-): Promise<ChatResult> {
+): Promise<DialogueChatExecution> {
   const startedAt = Date.now();
   const session = await stateStore.loadSession(payload.channel, payload.userId);
   const engine = new DialoguePolicyEngine(config, backend);
@@ -454,10 +668,13 @@ async function handleWithDialogueEngine(
   await eventLogger.log(botEvent);
 
   return {
-    reply,
-    alerts,
-    ui,
-    state: result.state,
+    chat: {
+      reply,
+      alerts,
+      ui,
+      state: result.state,
+    },
+    intent,
   };
 }
 
@@ -1050,6 +1267,7 @@ function parseOrderFromText(
     ok: true,
     data: {
       customer: {
+        channelUserId: userId,
         telegramId: userId,
         name,
         phone,
@@ -1071,7 +1289,17 @@ function renderOrder(order: any): string {
     etaMinutes > 0
       ? `\nDự kiến giao: ${etaMinutes} phút${distanceKm > 0 ? ` (~${distanceKm.toFixed(1)} km)` : ""}`
       : "";
-  return `Đơn ${order.orderCode}\nTrạng thái: ${order.status}\nTổng: ${formatVnd(order.totalVnd)}${deliveryLine}\nSản phẩm:\n${itemText}`;
+  return [
+    `Đơn ${order.orderCode}`,
+    `Trạng thái: ${order.status}`,
+    `Người nhận: ${order.customerName || "(chưa có)"}`,
+    `SĐT: ${order.customerPhone || "(chưa có)"}`,
+    `Địa chỉ: ${order.customerAddress || "(chưa có)"}`,
+    `Thanh toán: ${order.paymentMethod || "(chưa có)"}`,
+    `Tổng: ${formatVnd(order.totalVnd)}${deliveryLine}`,
+    "Sản phẩm:",
+    itemText || "(trống)",
+  ].join("\n");
 }
 
 function formatVnd(value: number): string {
@@ -1266,20 +1494,22 @@ function extractFirstJsonObject(raw: string): string | null {
 }
 
 function normalizeChatResult(result: ChatResult): ChatResult {
-  if (!result.ui?.suggestions?.length) {
-    return result;
-  }
-
-  const suggestions = result.ui.suggestions
-    .map((entry) => normalizeSuggestion(entry))
-    .filter((entry): entry is UiSuggestion => Boolean(entry));
-
+  const ui = normalizeRuntimeMenuUi(result.ui);
+  const handoffHistory = result.handoff?.history?.map((entry) => ({
+    ...entry,
+    ...(entry.ui ? { ui: normalizeRuntimeMenuUi(entry.ui) } : {}),
+  }));
   return {
     ...result,
-    ui: {
-      ...result.ui,
-      suggestions,
-    },
+    ...(ui ? { ui } : {}),
+    ...(result.handoff
+      ? {
+          handoff: {
+            ...result.handoff,
+            ...(handoffHistory ? { history: handoffHistory } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1304,6 +1534,88 @@ function normalizeSuggestion(entry: string | UiSuggestion): UiSuggestion | null 
     label,
     payload: legacySuggestionPayload(label),
   };
+}
+
+function normalizeRuntimeMenuUi(ui?: ChatMenuUi): ChatMenuUi | undefined {
+  if (!ui) {
+    return undefined;
+  }
+  if (!ui.suggestions?.length) {
+    return ui;
+  }
+  const suggestions = ui.suggestions
+    .map((entry) => normalizeSuggestion(entry))
+    .filter((entry): entry is UiSuggestion => Boolean(entry));
+  return {
+    ...ui,
+    suggestions,
+  };
+}
+
+function toStoredMenuUi(ui?: ChatMenuUi): ChatMessageUi | undefined {
+  if (!ui) {
+    return undefined;
+  }
+
+  const normalized = normalizeRuntimeMenuUi(ui);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const suggestions: ChatUiSuggestion[] = (normalized.suggestions || [])
+    .map((entry) => normalizeSuggestion(entry))
+    .filter((entry): entry is UiSuggestion => Boolean(entry))
+    .map((entry) => ({ label: entry.label, payload: entry.payload }));
+
+  return {
+    type: "menu",
+    title: normalized.title,
+    items: normalized.items.map((item) => ({
+      sku: item.sku,
+      name: item.name,
+      ...(item.category ? { category: item.category } : {}),
+      priceVnd: Number(item.priceVnd || 0),
+      stockQty: Number(item.stockQty || 0),
+    })),
+    ...(suggestions.length ? { suggestions } : {}),
+  };
+}
+
+function toRuntimeMenuUi(ui?: ChatMessageUi): ChatMenuUi | undefined {
+  if (!ui) {
+    return undefined;
+  }
+  return {
+    type: "menu",
+    title: ui.title,
+    items: ui.items.map((item) => ({
+      sku: item.sku,
+      name: item.name,
+      ...(item.category ? { category: item.category } : {}),
+      priceVnd: Number(item.priceVnd || 0),
+      stockQty: Number(item.stockQty || 0),
+    })),
+    ...(ui.suggestions?.length
+      ? {
+          suggestions: ui.suggestions.map((entry) => ({
+            label: entry.label,
+            payload: entry.payload,
+          })),
+        }
+      : {}),
+  };
+}
+
+function serializeHandoffHistory(history: ChatMessage[]): HandoffClientMessage[] {
+  return history
+    .filter((entry) => String(entry.content || "").trim() !== "ACTION_HANDOFF_STATUS")
+    .map((entry) => ({
+      id: entry.id,
+      role: entry.role,
+      content: entry.content,
+      timestampMs: entry.timestampMs,
+      ...(entry.ui ? { ui: toRuntimeMenuUi(entry.ui) } : {}),
+    }));
 }
 
 function legacySuggestionPayload(label: string): string {
@@ -1384,6 +1696,53 @@ function buildHandoffWaitingReply(channel: ChatChannel): ChatResult {
   };
 }
 
+function isHandoffResumeSignal(message: string, actionPayload?: string): boolean {
+  const action = (actionPayload || "").trim().toUpperCase();
+  if (action === "ACTION_HANDOFF_RESUME") {
+    return true;
+  }
+
+  const normalized = normalizeVietnamese(legacyTextFromAction(message, actionPayload));
+  return containsAny(normalized, ["tiep tuc voi bot", "quay lai bot", "tro lai bot", "resume bot"]);
+}
+
+async function dispatchAdminAlerts(config: OpenClawConfig, alerts: string[] | undefined, channel: ChatChannel): Promise<void> {
+  if (!alerts?.length) {
+    return;
+  }
+  if (channel === "telegram") {
+    // Telegram gateway already forwards alerts to admin chat.
+    return;
+  }
+  const alertToken = config.alertTelegramToken || config.telegramToken;
+  const alertChatId = config.adminAlertChatId || config.alertTelegramChatId;
+  if (!alertToken || !alertChatId) {
+    return;
+  }
+
+  for (const alert of alerts) {
+    const text = String(alert || "").trim();
+    if (!text) {
+      continue;
+    }
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${alertToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: alertChatId,
+          text: `[ALERT] ${text}`,
+        }),
+      });
+      if (!response.ok) {
+        logger.warn({ status: response.status, body: await response.text(), channel }, "admin alert dispatch failed");
+      }
+    } catch (error) {
+      logger.warn({ error: String(error), channel }, "admin alert dispatch failed");
+    }
+  }
+}
+
 type KpiCounters = {
   totalBotEvents: number;
   fallbackCount: number;
@@ -1418,6 +1777,38 @@ type KpiSummaryPayload = {
   };
 };
 
+type MessengerWorkerQueueStats = {
+  main: number;
+  processing: number;
+  retry: number;
+  dead: number;
+};
+
+type MessengerWorkerMetrics = {
+  startedAt?: string;
+  lastHeartbeatAt?: string;
+  lastUpdatedAt?: string;
+  processedSuccess: number;
+  processError: number;
+  retryScheduled: number;
+  retryRequeued: number;
+  deadLettered: number;
+  recoveredInFlight: number;
+};
+
+type MessengerWorkerCheck = {
+  ok: boolean;
+  detail: string;
+  queues: MessengerWorkerQueueStats;
+  metrics: MessengerWorkerMetrics;
+  heartbeat: {
+    seen: boolean;
+    lastSeenAt?: string;
+    staleSeconds?: number;
+  };
+  alerts: string[];
+};
+
 type OpsSummaryPayload = {
   generatedAt: string;
   uptimeSec: number;
@@ -1436,11 +1827,14 @@ type OpsSummaryPayload = {
     dialogueDb: { ok: boolean; detail: string };
     handoffRedis: { ok: boolean; detail: string };
     chatRateLimiter: RateLimiterHealth;
+    messengerWorker: MessengerWorkerCheck;
   };
   kpi?: KpiSummaryPayload;
 };
 
 async function buildOpsSummary(input: {
+  config: OpenClawConfig;
+  messengerOpsRedis: Redis | null;
   dialoguePool: Pool | null;
   handoffStore: HandoffStore;
   rateLimiterHealth: RateLimiterHealth;
@@ -1450,6 +1844,7 @@ async function buildOpsSummary(input: {
 
   const dialogueDbCheck = await checkDialogueDb(input.dialoguePool);
   const handoffRedisCheck = await input.handoffStore.healthCheck();
+  const messengerWorkerCheck = await collectMessengerWorkerCheck(input.config, input.messengerOpsRedis);
 
   let kpi: KpiSummaryPayload | undefined;
   if (input.dialoguePool) {
@@ -1478,6 +1873,7 @@ async function buildOpsSummary(input: {
       dialogueDb: dialogueDbCheck,
       handoffRedis: handoffRedisCheck,
       chatRateLimiter: input.rateLimiterHealth,
+      messengerWorker: messengerWorkerCheck,
     },
     ...(kpi ? { kpi } : {}),
   };
@@ -1493,6 +1889,132 @@ async function checkDialogueDb(pool: Pool | null): Promise<{ ok: boolean; detail
   } catch (error) {
     return { ok: false, detail: String(error) };
   }
+}
+
+async function collectMessengerWorkerCheck(config: OpenClawConfig, redis: Redis | null): Promise<MessengerWorkerCheck> {
+  if (!config.messengerQueueAlertEnabled) {
+    return {
+      ok: true,
+      detail: "disabled",
+      queues: { main: 0, processing: 0, retry: 0, dead: 0 },
+      metrics: emptyMessengerWorkerMetrics(),
+      heartbeat: { seen: false },
+      alerts: [],
+    };
+  }
+
+  if (!redis) {
+    return {
+      ok: false,
+      detail: "redis_not_initialized",
+      queues: { main: 0, processing: 0, retry: 0, dead: 0 },
+      metrics: emptyMessengerWorkerMetrics(),
+      heartbeat: { seen: false },
+      alerts: ["check_failed"],
+    };
+  }
+
+  try {
+    if (redis.status === "wait" || redis.status === "end") {
+      await redis.connect();
+    }
+
+    const [mainLen, processingLen, retryLen, deadLen, metricsMap, heartbeatRaw] = await Promise.all([
+      redis.llen(config.messengerQueueMainKey),
+      redis.llen(config.messengerQueueProcessingKey),
+      redis.zcard(config.messengerQueueRetryKey),
+      redis.llen(config.messengerQueueDeadKey),
+      redis.hgetall(config.messengerMetricsHashKey),
+      redis.get(config.messengerHeartbeatKey),
+    ]);
+
+    const queues: MessengerWorkerQueueStats = {
+      main: safeRedisInt(mainLen),
+      processing: safeRedisInt(processingLen),
+      retry: safeRedisInt(retryLen),
+      dead: safeRedisInt(deadLen),
+    };
+    const metrics = parseMessengerWorkerMetrics(metricsMap);
+
+    const heartbeatTs = safeRedisInt(heartbeatRaw);
+    const hasHeartbeat = heartbeatTs > 0;
+    const staleSeconds = hasHeartbeat ? Math.max(0, Math.floor(Date.now() / 1000) - heartbeatTs) : undefined;
+    const alerts: string[] = [];
+    if (queues.dead >= config.messengerDeadThreshold) {
+      alerts.push(`dead_queue=${queues.dead} >= ${config.messengerDeadThreshold}`);
+    }
+    if (queues.retry >= config.messengerRetryThreshold) {
+      alerts.push(`retry_queue=${queues.retry} >= ${config.messengerRetryThreshold}`);
+    }
+    if (queues.processing >= config.messengerProcessingThreshold) {
+      alerts.push(`processing_queue=${queues.processing} >= ${config.messengerProcessingThreshold}`);
+    }
+    if (!hasHeartbeat) {
+      alerts.push("heartbeat_missing");
+    } else if ((staleSeconds || 0) >= config.messengerHeartbeatStaleSec) {
+      alerts.push(`heartbeat_stale=${staleSeconds}s >= ${config.messengerHeartbeatStaleSec}s`);
+    }
+
+    return {
+      ok: alerts.length === 0,
+      detail: alerts.length === 0 ? "ok" : "threshold_breached",
+      queues,
+      metrics,
+      heartbeat: {
+        seen: hasHeartbeat,
+        ...(hasHeartbeat ? { lastSeenAt: new Date(heartbeatTs * 1000).toISOString() } : {}),
+        ...(typeof staleSeconds === "number" ? { staleSeconds } : {}),
+      },
+      alerts,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: String(error),
+      queues: { main: 0, processing: 0, retry: 0, dead: 0 },
+      metrics: emptyMessengerWorkerMetrics(),
+      heartbeat: { seen: false },
+      alerts: ["check_failed"],
+    };
+  }
+}
+
+function emptyMessengerWorkerMetrics(): MessengerWorkerMetrics {
+  return {
+    processedSuccess: 0,
+    processError: 0,
+    retryScheduled: 0,
+    retryRequeued: 0,
+    deadLettered: 0,
+    recoveredInFlight: 0,
+  };
+}
+
+function parseMessengerWorkerMetrics(input: Record<string, string>): MessengerWorkerMetrics {
+  return {
+    startedAt: trimString(input.startedAt),
+    lastHeartbeatAt: trimString(input.lastHeartbeatAt),
+    lastUpdatedAt: trimString(input.lastUpdatedAt),
+    processedSuccess: safeRedisInt(input.processedSuccess),
+    processError: safeRedisInt(input.processError),
+    retryScheduled: safeRedisInt(input.retryScheduled),
+    retryRequeued: safeRedisInt(input.retryRequeued),
+    deadLettered: safeRedisInt(input.deadLettered),
+    recoveredInFlight: safeRedisInt(input.recoveredInFlight),
+  };
+}
+
+function trimString(value: unknown): string | undefined {
+  const text = String(value ?? "").trim();
+  return text ? text : undefined;
+}
+
+function safeRedisInt(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(parsed));
 }
 
 async function buildKpiSummary(pool: Pool, windowMinutes: number): Promise<KpiSummaryPayload> {
